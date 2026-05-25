@@ -7,6 +7,9 @@ FPP_SRC ?= /opt/fpp/src
 CXX      ?= g++
 CXXFLAGS  = -std=gnu++20 -O2 -fPIC -Wall -Wextra
 CXXFLAGS += -I$(FPP_SRC) -DNOPCH
+# jsoncpp headers live under /usr/include/jsoncpp/ on Debian/Bookworm;
+# drogon includes <json/json.h> directly so we need this on the search path.
+CXXFLAGS += $(shell pkg-config --cflags jsoncpp 2>/dev/null || echo "-I/usr/include/jsoncpp")
 # Silence "unused parameter" noise from FPP headers
 CXXFLAGS += -Wno-unused-parameter
 

@@ -1,7 +1,9 @@
 #include "TuyaDevice.h"
+#include "TuyaLog.h"
 #include "TuyaProtocol.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstring>
 #include <ctime>
@@ -44,7 +46,10 @@ bool TuyaDevice::connect() {
     if (m_sock >= 0) return true;
 
     int sock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) return false;
+    if (sock < 0) {
+        TuyaLog::err("Device '%s': socket() failed: %s", m_name.c_str(), strerror(errno));
+        return false;
+    }
 
     // Set send/receive timeouts
     struct timeval tv;
@@ -58,15 +63,19 @@ bool TuyaDevice::connect() {
     addr.sin_family = AF_INET;
     addr.sin_port   = htons(TUYA_PORT);
     if (inet_pton(AF_INET, m_ip.c_str(), &addr.sin_addr) <= 0) {
+        TuyaLog::err("Device '%s': invalid IP address '%s'", m_name.c_str(), m_ip.c_str());
         ::close(sock);
         return false;
     }
 
     if (::connect(sock, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+        TuyaLog::err("Device '%s': TCP connect to %s:%d failed: %s",
+                     m_name.c_str(), m_ip.c_str(), TUYA_PORT, strerror(errno));
         ::close(sock);
         return false;
     }
 
+    TuyaLog::info("Device '%s': connected to %s:%d", m_name.c_str(), m_ip.c_str(), TUYA_PORT);
     m_sock = sock;
     return true;
 }
@@ -90,6 +99,8 @@ bool TuyaDevice::sendPacket(const std::vector<uint8_t>& packet) {
 
     ssize_t sent = ::send(m_sock, packet.data(), packet.size(), MSG_NOSIGNAL);
     if (sent != static_cast<ssize_t>(packet.size())) {
+        TuyaLog::err("Device '%s': send failed (sent %zd of %zu bytes): %s",
+                     m_name.c_str(), sent, packet.size(), strerror(errno));
         ::close(m_sock);
         m_sock = -1;
         return false;

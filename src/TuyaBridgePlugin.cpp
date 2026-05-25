@@ -24,6 +24,8 @@
 #include <commands/Commands.h>
 #include <log.h>
 
+#include "TuyaLog.h"
+
 // Standard library
 #include <algorithm>
 #include <fstream>
@@ -84,25 +86,30 @@ public:
             return std::make_unique<ErrorResult>("Usage: device state");
 
         TuyaDevice* dev = m_plugin->findDevice(a[0]);
-        if (!dev)
+        if (!dev) {
+            TuyaLog::err("SetSwitch: device not found: %s", a[0].c_str());
             return std::make_unique<ErrorResult>("Device not found: " + a[0]);
+        }
 
         if (a[1] == "toggle") {
-            return m_plugin->toggleSwitch(a[0])
-                ? std::make_unique<Result>("OK")
-                : std::make_unique<ErrorResult>("Send failed for device: " + a[0]);
+            if (!m_plugin->toggleSwitch(a[0])) {
+                TuyaLog::err("SetSwitch toggle: send failed for device %s", a[0].c_str());
+                return std::make_unique<ErrorResult>("Send failed for device: " + a[0]);
+            }
+            return std::make_unique<Result>("OK");
         }
 
         bool on = (a[1] == "on" || a[1] == "1" || a[1] == "true");
 
-        // Update tracked state then send
         {
             std::lock_guard<std::mutex> lk(m_plugin->m_stateMutex);
             m_plugin->m_switchStates[a[0]] = on;
         }
-        return dev->setSwitch(on)
-            ? std::make_unique<Result>("OK")
-            : std::make_unique<ErrorResult>("Send failed for device: " + a[0]);
+        if (!dev->setSwitch(on)) {
+            TuyaLog::err("SetSwitch: send failed for device %s (state=%s)", a[0].c_str(), a[1].c_str());
+            return std::make_unique<ErrorResult>("Send failed for device: " + a[0]);
+        }
+        return std::make_unique<Result>("OK");
     }
 
 private:
@@ -125,14 +132,17 @@ public:
             return std::make_unique<ErrorResult>("Usage: device brightness");
 
         TuyaDevice* dev = m_plugin->findDevice(a[0]);
-        if (!dev)
+        if (!dev) {
+            TuyaLog::err("SetDimmer: device not found: %s", a[0].c_str());
             return std::make_unique<ErrorResult>("Device not found: " + a[0]);
+        }
 
         int brightness = std::clamp(std::stoi(a[1]), 0, 100);
-
-        return dev->setDimmer(brightness)
-            ? std::make_unique<Result>("OK")
-            : std::make_unique<ErrorResult>("Send failed for device: " + a[0]);
+        if (!dev->setDimmer(brightness)) {
+            TuyaLog::err("SetDimmer: send failed for device %s (brightness=%d)", a[0].c_str(), brightness);
+            return std::make_unique<ErrorResult>("Send failed for device: " + a[0]);
+        }
+        return std::make_unique<Result>("OK");
     }
 
 private:
@@ -164,9 +174,12 @@ public:
         uint8_t g = clamp255(std::stoi(a[2]));
         uint8_t b = clamp255(std::stoi(a[3]));
 
-        return dev->setColor(r, g, b)
-            ? std::make_unique<Result>("OK")
-            : std::make_unique<ErrorResult>("Send failed for device: " + a[0]);
+        if (!dev->setColor(r, g, b)) {
+            TuyaLog::err("SetColor: send failed for device %s (r=%d g=%d b=%d)",
+                         a[0].c_str(), r, g, b);
+            return std::make_unique<ErrorResult>("Send failed for device: " + a[0]);
+        }
+        return std::make_unique<Result>("OK");
     }
 
 private:
@@ -191,8 +204,10 @@ public:
             return std::make_unique<ErrorResult>("Usage: device dps_key value");
 
         TuyaDevice* dev = m_plugin->findDevice(a[0]);
-        if (!dev)
+        if (!dev) {
+            TuyaLog::err("SendDPS: device not found: %s", a[0].c_str());
             return std::make_unique<ErrorResult>("Device not found: " + a[0]);
+        }
 
         const std::string& valStr = a[2];
         Json::Value dps;
@@ -213,9 +228,12 @@ public:
             }
         }
 
-        return dev->sendRawDps(dps)
-            ? std::make_unique<Result>("OK")
-            : std::make_unique<ErrorResult>("Send failed for device: " + a[0]);
+        if (!dev->sendRawDps(dps)) {
+            TuyaLog::err("SendDPS: send failed for device %s (key=%s val=%s)",
+                         a[0].c_str(), a[1].c_str(), a[2].c_str());
+            return std::make_unique<ErrorResult>("Send failed for device: " + a[0]);
+        }
+        return std::make_unique<Result>("OK");
     }
 
 private:
@@ -236,6 +254,7 @@ static std::string getDevicesConfPath() {
 TuyaBridgePlugin::TuyaBridgePlugin()
     : FPPPlugin("TuyaBridge") {
     LogInfo(VB_PLUGIN, "TuyaBridge: initialising\n");
+    TuyaLog::info("Plugin starting");
     loadDevices(getDevicesConfPath());
     registerCommands();
 }
@@ -243,6 +262,7 @@ TuyaBridgePlugin::TuyaBridgePlugin()
 TuyaBridgePlugin::~TuyaBridgePlugin() {
     unregisterCommands();
     LogInfo(VB_PLUGIN, "TuyaBridge: shutdown\n");
+    TuyaLog::info("Plugin stopped");
 }
 
 void TuyaBridgePlugin::loadDevices(const std::string& confPath) {
@@ -251,6 +271,7 @@ void TuyaBridgePlugin::loadDevices(const std::string& confPath) {
     std::ifstream f(confPath);
     if (!f.is_open()) {
         LogWarn(VB_PLUGIN, "TuyaBridge: devices.conf not found at %s\n", confPath.c_str());
+        TuyaLog::warn("devices.conf not found at %s — no devices loaded", confPath.c_str());
         return;
     }
 
@@ -259,6 +280,7 @@ void TuyaBridgePlugin::loadDevices(const std::string& confPath) {
     std::string errs;
     if (!Json::parseFromStream(rb, f, &root, &errs) || !root.isArray()) {
         LogErr(VB_PLUGIN, "TuyaBridge: failed to parse devices.conf: %s\n", errs.c_str());
+        TuyaLog::err("Failed to parse devices.conf: %s", errs.c_str());
         return;
     }
 
@@ -272,10 +294,14 @@ void TuyaBridgePlugin::loadDevices(const std::string& confPath) {
 
         if (name.empty() || ip.empty() || id.empty() || key.empty()) {
             LogWarn(VB_PLUGIN, "TuyaBridge: skipping incomplete device entry\n");
+            TuyaLog::warn("Skipping incomplete device entry (name='%s' ip='%s')",
+                          name.c_str(), ip.c_str());
             continue;
         }
         if (key.size() != 16) {
             LogWarn(VB_PLUGIN, "TuyaBridge: key for '%s' is not 16 bytes — skipping\n", name.c_str());
+            TuyaLog::warn("Device '%s': local key must be exactly 16 bytes (got %zu) — skipping",
+                          name.c_str(), key.size());
             continue;
         }
 
@@ -284,6 +310,8 @@ void TuyaBridgePlugin::loadDevices(const std::string& confPath) {
 
         LogInfo(VB_PLUGIN, "TuyaBridge: loaded device '%s' (%s) v%s\n",
                 name.c_str(), ip.c_str(), version.c_str());
+        TuyaLog::info("Loaded device '%s' at %s version %s type %s",
+                      name.c_str(), ip.c_str(), version.c_str(), type.c_str());
     }
 }
 
@@ -313,6 +341,8 @@ void TuyaBridgePlugin::registerCommands() {
 
     m_commandsRegistered = {sw->name, dim->name, col->name, dps->name};
     LogInfo(VB_PLUGIN, "TuyaBridge: registered %zu commands\n", m_commandsRegistered.size());
+    TuyaLog::info("Registered %zu commands for %zu device(s)",
+                  m_commandsRegistered.size(), m_devices.size());
 }
 
 void TuyaBridgePlugin::unregisterCommands() {

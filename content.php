@@ -95,15 +95,18 @@ function setVal(i, k, v)  { devices[i][k] = v; }
 function addRow()          { devices.push({name:'',ip:'',id:'',key:'',version:'3.3',type:'switch'}); renderTable(); }
 function removeRow(i)      { devices.splice(i, 1); renderTable(); }
 
+const PLUGIN_API = 'plugin.php?plugin=fpp-TuyaBridge&nopage=1&page=plugin_request.php';
+
 function saveDevices() {
     $.post(
-        'plugin_request.php?plugin=fpp-TuyaBridge&command=saveDevices',
+        PLUGIN_API + '&command=saveDevices',
         { data: JSON.stringify(devices) },
         function() {
             $.jGrowl('Devices saved. Restart fppd (FPP Status page) to apply changes.', { theme: 'success' });
         }
-    ).fail(function() {
-        $.jGrowl('Save failed — check FPP logs.', { theme: 'danger' });
+    ).fail(function(xhr) {
+        $.jGrowl('Save failed — check /home/fpp/media/logs/fpp-TuyaBridge.log for details.', { theme: 'danger' });
+        console.error('saveDevices error:', xhr.status, xhr.responseText);
     });
 }
 

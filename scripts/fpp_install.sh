@@ -32,9 +32,6 @@ cd "${PLUGIN_DIR}"
 make FPP_SRC="${FPP_SRC}" clean
 make FPP_SRC="${FPP_SRC}" -j"$(nproc)"
 
-echo "fpp-TuyaBridge: Copying ${SONAME} to plugin directory..."
-cp "${SONAME}" "${PLUGIN_DIR}/"
-
 echo "fpp-TuyaBridge: Install complete."
 echo "  The plugin loads automatically when fppd starts."
 echo "  Configure devices: FPP web UI → Content Setup → Tuya Bridge."

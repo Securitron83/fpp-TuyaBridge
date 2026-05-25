@@ -1,0 +1,17 @@
+# Force LF for all text files — these run on Linux (Raspberry Pi)
+* text=auto eol=lf
+
+# Shell scripts must be LF or they won't execute
+*.sh text eol=lf
+
+# C/C++ source
+*.cpp text eol=lf
+*.h   text eol=lf
+
+# Web files
+*.php text eol=lf
+*.js  text eol=lf
+*.json text eol=lf
+
+# Makefile must use tabs, not spaces — preserve as-is
+Makefile text eol=lf

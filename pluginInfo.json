@@ -1,0 +1,24 @@
+{
+  "repoName": "fpp-TuyaBridge",
+  "name": "Tuya Bridge",
+  "author": "Russell Brent Vaughan",
+  "description": "Control Tuya smart devices (switches, dimmers, RGB lights) directly from FPP sequences and scripts via the Tuya local protocol — no cloud, no MQTT, no Node.js.",
+  "homeURL": "https://github.com/Securitron83/fpp-TuyaBridge",
+  "srcURL": "https://github.com/Securitron83/fpp-TuyaBridge.git",
+  "versions": [
+    {
+      "minFPPVersion": "9.0",
+      "maxFPPVersion": "0",
+      "branch": "main",
+      "sha": "",
+      "allowUpdates": 1
+    }
+  ],
+  "menuItems": [
+    {
+      "title": "Tuya Bridge",
+      "page": "content.php",
+      "type": "content"
+    }
+  ]
+}

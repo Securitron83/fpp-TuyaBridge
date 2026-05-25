@@ -1,0 +1,21 @@
+# Compiled output
+*.so
+*.o
+src/*.o
+
+# Backup files created before the C++ rewrite
+*.bak
+
+# Device config — contains local keys, never commit
+devices.conf
+
+# Legacy Node.js files (replaced by C++ plugin)
+tuya-mqtt.js
+config.js
+plugin_setup.old
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.swp
+*~

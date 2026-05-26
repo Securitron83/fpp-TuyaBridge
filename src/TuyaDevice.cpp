@@ -145,7 +145,7 @@ bool TuyaDevice::sendJson(const Json::Value& dps) {
     payload["gwId"]  = m_deviceId;
     payload["devId"] = m_deviceId;
     payload["uid"]   = m_deviceId;
-    payload["t"]     = static_cast<Json::Int64>(std::time(nullptr));
+    payload["t"]     = std::to_string(std::time(nullptr));
     payload["dps"]   = dps;
 
     Json::StreamWriterBuilder wb;

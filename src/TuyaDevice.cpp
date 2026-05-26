@@ -140,12 +140,21 @@ bool TuyaDevice::sendJson(const Json::Value& dps) {
     wb["indentation"] = "";
     std::string jsonStr = Json::writeString(wb, payload);
 
-    // Debug: log DPS in a format similar to the MQTT topic style
+    // Debug: log each DPS key in MQTT-topic style so output is directly
+    // comparable to the old tuya-mqtt format: tuya/{name}/dps/{key}/command
     if (TuyaLog::debugEnabled()) {
-        std::string dpsStr = Json::writeString(wb, dps);
-        TuyaLog::debug("tuya/%s/dps/set  device=%s ip=%s ver=%s  payload=%s",
+        TuyaLog::debug("--- sending to device '%s'  id=%s  ip=%s  ver=%s ---",
                        m_name.c_str(), m_deviceId.c_str(),
-                       m_ip.c_str(), m_version.c_str(), dpsStr.c_str());
+                       m_ip.c_str(), m_version.c_str());
+        for (const auto& key : dps.getMemberNames()) {
+            const Json::Value& val = dps[key];
+            std::string valStr;
+            if (val.isBool())        valStr = val.asBool() ? "true" : "false";
+            else if (val.isInt())    valStr = std::to_string(val.asInt());
+            else                     valStr = val.asString();
+            TuyaLog::debug("  tuya/%s/dps/%s/command  %s",
+                           m_name.c_str(), key.c_str(), valStr.c_str());
+        }
     }
 
     std::vector<uint8_t> pkt;

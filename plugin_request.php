@@ -89,6 +89,7 @@ switch ($command) {
 
     case 'toggleDebug':
         $flagFile = $mediaDir . '/plugins/fpp-TuyaBridge/debug.flag';
+        header('Content-Type: application/json');
         if (file_exists($flagFile)) {
             unlink($flagFile);
             tuyaLog("Debug mode disabled via UI");
@@ -101,18 +102,38 @@ switch ($command) {
         break;
 
     case 'getLog':
-        $maxLines = min(intval($_GET['lines'] ?? 200), 500);
+        $maxLines  = min(intval($_GET['lines'] ?? 200), 500);
+        $flagFile  = $mediaDir . '/plugins/fpp-TuyaBridge/debug.flag';
+        $soFile    = $mediaDir . '/plugins/fpp-TuyaBridge/libfpp-TuyaBridge.so';
+        $debugOn   = file_exists($flagFile);
+        $soExists  = file_exists($soFile);
+
+        // Always prepend a status block so the user can see diagnostics
+        // even when the log file is empty or missing.
+        $status  = "=== Tuya Bridge Plugin Status ===\n";
+        $status .= "Plugin .so : " . ($soExists  ? "OK"                        : "NOT FOUND (build failed?)") . "\n";
+        $status .= "Debug mode : " . ($debugOn   ? "ENABLED"                   : "DISABLED — tick the checkbox to enable") . "\n";
+        $status .= "Log file   : " . (file_exists($logFile)
+                        ? "exists (" . number_format(filesize($logFile)) . " bytes)"
+                        : "not yet created") . "\n";
+        $status .= "=================================\n";
+
+        $logText = '';
+        if (file_exists($logFile)) {
+            $lines = file($logFile, FILE_IGNORE_NEW_LINES);
+            if ($lines !== false) {
+                $logText = implode("\n", array_slice($lines, -$maxLines));
+            } else {
+                $logText = '(could not read log file — check permissions)';
+            }
+        }
+
+        // Strip non-printable / non-UTF-8 bytes so json_encode never returns false.
+        // Old log files may contain binary AES output from a previous bug.
+        $logText = preg_replace('/[^\x09\x0A\x0D\x20-\x7E]/', '?', $logText);
+
         header('Content-Type: application/json');
-        if (!file_exists($logFile)) {
-            echo json_encode(['log' => '(log file not yet created — save a device or send a command first)']);
-            break;
-        }
-        $lines = file($logFile, FILE_IGNORE_NEW_LINES);
-        if ($lines === false) {
-            echo json_encode(['log' => '(could not read log file)']);
-            break;
-        }
-        echo json_encode(['log' => implode("\n", array_slice($lines, -$maxLines))]);
+        echo json_encode(['log' => $status . $logText]);
         break;
 
     default:

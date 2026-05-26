@@ -18,8 +18,8 @@
 
 static const int TUYA_PORT         = 6668;
 static const int CONNECT_TIMEOUT_S = 3;
-static const int GREETING_DRAIN_MS = 400;  // wait for device greeting on new connection
-static const int RESPONSE_WAIT_MS  = 600;  // wait for SET response in debug mode
+static const int GREETING_DRAIN_MS = 300;  // wait for device greeting on new connection
+static const int RESPONSE_WAIT_MS  = 1500; // wait for SET response in debug mode
 
 TuyaDevice::TuyaDevice(const std::string& name,
                         const std::string& ip,

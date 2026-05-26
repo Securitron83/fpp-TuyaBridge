@@ -16,8 +16,10 @@ namespace Tuya {
 static const uint8_t PREFIX[4] = {0x00, 0x00, 0x55, 0xAA};
 static const uint8_t SUFFIX[4] = {0x00, 0x00, 0xAA, 0x55};
 
-// v3.3 version header: "3.3" + 9 null bytes = 12 bytes
-static const uint8_t VER33[12] = {'3', '.', '3', 0, 0, 0, 0, 0, 0, 0, 0, 0};
+// v3.3 version header: "3.3" + 12 null bytes = 15 bytes.
+// tinytuya, pytuya, and real device firmware all use 15 bytes; using 12 shifts
+// the encrypted payload 3 bytes into the header field, causing "parse data error".
+static const uint8_t VER33[15] = {'3', '.', '3', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -126,8 +128,8 @@ std::vector<uint8_t> buildPacket33(const std::string& localKey,
                                     uint32_t command) {
     auto encrypted = aesEcbEncrypt(localKey, jsonPayload);
 
-    // length field = version_header(12) + encrypted + CRC(4) + suffix(4)
-    uint32_t length = 12 + static_cast<uint32_t>(encrypted.size()) + 8;
+    // length field = version_header(15) + encrypted + CRC(4) + suffix(4)
+    uint32_t length = 15 + static_cast<uint32_t>(encrypted.size()) + 8;
 
     std::vector<uint8_t> pkt;
     pkt.reserve(4 + 12 + length);
@@ -136,7 +138,7 @@ std::vector<uint8_t> buildPacket33(const std::string& localKey,
     pushU32BE(pkt, sequence);
     pushU32BE(pkt, command);
     pushU32BE(pkt, length);
-    pkt.insert(pkt.end(), VER33, VER33 + 12);
+    pkt.insert(pkt.end(), VER33, VER33 + 15);
     pkt.insert(pkt.end(), encrypted.begin(), encrypted.end());
 
     uint32_t crc = computeCRC(pkt.data(), pkt.size());
@@ -203,11 +205,11 @@ std::string decodeResponse(const std::vector<uint8_t>& pkt,
     if (dataLen == 0) return "";
 
     if (version == "3.3") {
-        // Some v3.3 responses include the 12-byte version header; skip it if present
-        if (dataLen >= 12 &&
+        // Some v3.3 responses include the 15-byte version header; skip it if present
+        if (dataLen >= 15 &&
             pkt[dataStart] == '3' && pkt[dataStart + 1] == '.' && pkt[dataStart + 2] == '3') {
-            dataStart += 12;
-            dataLen   -= 12;
+            dataStart += 15;
+            dataLen   -= 15;
         }
         if (dataLen == 0) return "";
         return aesEcbDecrypt(localKey, pkt.data() + dataStart, dataLen);

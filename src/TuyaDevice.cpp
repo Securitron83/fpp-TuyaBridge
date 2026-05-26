@@ -138,20 +138,21 @@ bool TuyaDevice::sendPacket(const std::vector<uint8_t>& packet) {
 bool TuyaDevice::sendJson(const Json::Value& dps) {
     // Caller must hold m_mutex
 
-    // Standard Tuya local protocol SET payload.
-    // Match tuyapi/pytuya: devId + uid + t + dps only.
-    // gwId is intentionally omitted — it inflates the JSON beyond the firmware's
-    // parser buffer on compact devices (fans, simple switches), causing
-    // "parse data error" even when all DPS values are correct.
-    Json::Value payload;
-    payload["devId"] = m_deviceId;
-    payload["uid"]   = m_deviceId;
-    payload["t"]     = std::to_string(std::time(nullptr));
-    payload["dps"]   = dps;
-
+    // Build JSON payload in the exact field order tuyapi uses:
+    //   devId, uid, t, dps
+    // jsoncpp sorts keys alphabetically (devId, dps, t, uid), putting dps before
+    // the auth fields. Some Tuya firmware parsers validate devId/uid/t first and
+    // then act on dps — if dps appears earlier the parser returns "parse data error".
+    // Building the string manually avoids the sort and matches tuyapi exactly.
     Json::StreamWriterBuilder wb;
     wb["indentation"] = "";
-    std::string jsonStr = Json::writeString(wb, payload);
+    std::string dpsStr = Json::writeString(wb, dps);
+
+    std::string jsonStr =
+        "{\"devId\":\"" + m_deviceId +
+        "\",\"uid\":\""  + m_deviceId +
+        "\",\"t\":\""    + std::to_string(std::time(nullptr)) +
+        "\",\"dps\":"    + dpsStr + "}";
 
     if (TuyaLog::debugEnabled())
         TuyaLog::debug("JSON payload: %s", jsonStr.c_str());

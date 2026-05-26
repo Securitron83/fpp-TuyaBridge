@@ -180,24 +180,30 @@ std::vector<uint8_t> buildPacket31(const std::string& localKey,
 
 std::string decodeResponse(const std::vector<uint8_t>& pkt,
                             const std::string& localKey,
-                            const std::string& version) {
-    // Minimum packet: prefix(4) + seq(4) + cmd(4) + len(4) + crc(4) + suffix(4) = 24
-    if (pkt.size() < 24) return "";
+                            const std::string& version,
+                            uint32_t* retcodeOut) {
+    // Minimum: PREFIX(4)+SEQ(4)+CMD(4)+LEN(4)+RETCODE(4)+CRC(4)+SUFFIX(4) = 28 bytes
+    if (pkt.size() < 28) return "";
 
-    // Verify prefix and suffix
     if (pkt[0] != 0x00 || pkt[1] != 0x00 || pkt[2] != 0x55 || pkt[3] != 0xAA) return "";
 
     uint32_t length = readU32BE(pkt.data() + 12);
-    // length includes the data, CRC, and suffix (8 bytes at end)
     if (pkt.size() < 16 + length) return "";
 
-    size_t dataStart = 16;
-    size_t dataLen   = length - 8; // strip CRC + suffix
+    // Response packets have a 4-byte return code immediately after the fixed header.
+    // (Request/command packets do NOT have this field.)
+    // Layout from byte 16 onward: RETCODE(4) + [VER33(12)] + ENCRYPTED(N) + CRC(4) + SUFFIX(4)
+    if (length < 12) return "";                // need at least retcode + crc + suffix
+    uint32_t retcode = readU32BE(pkt.data() + 16);
+    if (retcodeOut) *retcodeOut = retcode;
+
+    size_t dataStart = 20;                     // skip retcode
+    size_t dataLen   = length - 4 - 8;         // LEN - retcode(4) - CRC(4) - SUFFIX(4)
 
     if (dataLen == 0) return "";
 
     if (version == "3.3") {
-        // Skip 12-byte version header if present
+        // Some v3.3 responses include the 12-byte version header; skip it if present
         if (dataLen >= 12 &&
             pkt[dataStart] == '3' && pkt[dataStart + 1] == '.' && pkt[dataStart + 2] == '3') {
             dataStart += 12;
@@ -206,7 +212,7 @@ std::string decodeResponse(const std::vector<uint8_t>& pkt,
         if (dataLen == 0) return "";
         return aesEcbDecrypt(localKey, pkt.data() + dataStart, dataLen);
     } else {
-        // v3.1 status responses are plain JSON (not encrypted)
+        // v3.1 responses are plain JSON (not encrypted)
         return std::string(pkt.begin() + dataStart, pkt.begin() + dataStart + dataLen);
     }
 }

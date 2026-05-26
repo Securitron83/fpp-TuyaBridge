@@ -30,12 +30,16 @@ std::vector<uint8_t> buildPacket31(
     uint32_t           command = CMD_SET
 );
 
-// Parse a received Tuya packet and return the plaintext JSON body.
+// Parse a received Tuya response packet and return the plaintext JSON body.
+// Response packets have an extra 4-byte return code after the fixed header
+// (not present in command/request packets).
+// If retcodeOut is non-null, the device's return code is written to it (0 = OK).
 // Returns empty string if the packet is malformed or decryption fails.
 std::string decodeResponse(
     const std::vector<uint8_t>& packet,
     const std::string&          localKey,
-    const std::string&          version
+    const std::string&          version,
+    uint32_t*                   retcodeOut = nullptr
 );
 
 } // namespace Tuya

@@ -191,11 +191,15 @@ bool TuyaDevice::sendJson(const Json::Value& dps) {
             ssize_t n = recv(m_sock, buf, sizeof(buf), MSG_DONTWAIT);
             if (n > 0) {
                 std::vector<uint8_t> respPkt(buf, buf + n);
-                std::string json = Tuya::decodeResponse(respPkt, m_localKey, m_version);
+                uint32_t retcode = 0xFFFFFFFF;
+                std::string json = Tuya::decodeResponse(respPkt, m_localKey, m_version, &retcode);
+                TuyaLog::debug("Device '%s' return code: 0x%08X (%s)",
+                               m_name.c_str(), retcode,
+                               retcode == 0 ? "OK" : "ERROR");
                 if (!json.empty())
-                    TuyaLog::debug("Device '%s' response: %s", m_name.c_str(), json.c_str());
+                    TuyaLog::debug("Device '%s' response JSON: %s", m_name.c_str(), json.c_str());
                 else
-                    TuyaLog::debug("Device '%s' response: %zd bytes (could not decode)", m_name.c_str(), n);
+                    TuyaLog::debug("Device '%s' response: %zd bytes (could not decode — wrong key or v3.4?)", m_name.c_str(), n);
             } else {
                 TuyaLog::debug("Device '%s': no response within %dms", m_name.c_str(), RESPONSE_WAIT_MS);
             }

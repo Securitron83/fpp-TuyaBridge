@@ -11,13 +11,15 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-static const int TUYA_PORT    = 6668;
+static const int TUYA_PORT         = 6668;
 static const int CONNECT_TIMEOUT_S = 3;
-static const int RECV_DRAIN_MS     = 200;
+static const int GREETING_DRAIN_MS = 400;  // wait for device greeting on new connection
+static const int RESPONSE_WAIT_MS  = 600;  // wait for SET response in debug mode
 
 TuyaDevice::TuyaDevice(const std::string& name,
                         const std::string& ip,
@@ -75,8 +77,20 @@ bool TuyaDevice::connect() {
         return false;
     }
 
-    TuyaLog::info("Device '%s': connected to %s:%d", m_name.c_str(), m_ip.c_str(), TUYA_PORT);
     m_sock = sock;
+    TuyaLog::info("Device '%s': connected to %s:%d", m_name.c_str(), m_ip.c_str(), TUYA_PORT);
+
+    // Many Tuya devices send a STATUS (CMD 0x0A) greeting immediately on connection.
+    // We must drain it before sending a SET command or the device will ignore us.
+    struct pollfd pfd;
+    pfd.fd     = m_sock;
+    pfd.events = POLLIN;
+    if (poll(&pfd, 1, GREETING_DRAIN_MS) > 0 && (pfd.revents & POLLIN)) {
+        uint8_t greeting[512];
+        ssize_t n = recv(m_sock, greeting, sizeof(greeting), MSG_DONTWAIT);
+        TuyaLog::debug("Device '%s': drained %zd-byte greeting on connect", m_name.c_str(), n);
+    }
+
     return true;
 }
 
@@ -118,19 +132,17 @@ bool TuyaDevice::sendPacket(const std::vector<uint8_t>& packet) {
         return false;
     }
 
-    // Drain the response so the device doesn't close the connection due to
-    // an unread reply. We don't parse it for now.
-    uint8_t buf[256];
-    recv(m_sock, buf, sizeof(buf), MSG_DONTWAIT);
-
     return true;
 }
 
 bool TuyaDevice::sendJson(const Json::Value& dps) {
     // Caller must hold m_mutex
 
-    // Build the full Tuya payload envelope
+    // Standard Tuya local protocol SET payload.
+    // gwId is required by many devices and must match devId — omitting it causes
+    // silent rejection on a large number of Tuya firmware versions.
     Json::Value payload;
+    payload["gwId"]  = m_deviceId;
     payload["devId"] = m_deviceId;
     payload["uid"]   = m_deviceId;
     payload["t"]     = static_cast<Json::Int64>(std::time(nullptr));
@@ -164,7 +176,39 @@ bool TuyaDevice::sendJson(const Json::Value& dps) {
         pkt = Tuya::buildPacket31(m_localKey, m_deviceId, jsonStr, m_sequence++);
     }
 
-    return sendPacket(pkt);
+    if (!sendPacket(pkt))
+        return false;
+
+    // Read the device's response.
+    // In debug mode: wait up to RESPONSE_WAIT_MS for a full reply and decode it.
+    // In normal mode: non-blocking drain so the socket stays clean for next call.
+    if (TuyaLog::debugEnabled()) {
+        struct pollfd pfd;
+        pfd.fd     = m_sock;
+        pfd.events = POLLIN;
+        if (poll(&pfd, 1, RESPONSE_WAIT_MS) > 0 && (pfd.revents & POLLIN)) {
+            uint8_t buf[1024];
+            ssize_t n = recv(m_sock, buf, sizeof(buf), MSG_DONTWAIT);
+            if (n > 0) {
+                std::vector<uint8_t> respPkt(buf, buf + n);
+                std::string json = Tuya::decodeResponse(respPkt, m_localKey, m_version);
+                if (!json.empty())
+                    TuyaLog::debug("Device '%s' response: %s", m_name.c_str(), json.c_str());
+                else
+                    TuyaLog::debug("Device '%s' response: %zd bytes (could not decode)", m_name.c_str(), n);
+            } else {
+                TuyaLog::debug("Device '%s': no response within %dms", m_name.c_str(), RESPONSE_WAIT_MS);
+            }
+        } else {
+            TuyaLog::debug("Device '%s': no response within %dms", m_name.c_str(), RESPONSE_WAIT_MS);
+        }
+    } else {
+        // Non-debug: quick non-blocking drain so stale data doesn't accumulate
+        uint8_t buf[256];
+        recv(m_sock, buf, sizeof(buf), MSG_DONTWAIT);
+    }
+
+    return true;
 }
 
 bool TuyaDevice::setSwitch(bool on) {

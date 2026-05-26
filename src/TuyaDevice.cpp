@@ -152,6 +152,9 @@ bool TuyaDevice::sendJson(const Json::Value& dps) {
     wb["indentation"] = "";
     std::string jsonStr = Json::writeString(wb, payload);
 
+    if (TuyaLog::debugEnabled())
+        TuyaLog::debug("JSON payload: %s", jsonStr.c_str());
+
     // Debug: log each DPS key in MQTT-topic style so output is directly
     // comparable to the old tuya-mqtt format: tuya/{name}/dps/{key}/command
     if (TuyaLog::debugEnabled()) {

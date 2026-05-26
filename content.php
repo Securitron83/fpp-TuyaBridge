@@ -46,42 +46,45 @@ if (file_exists($devicesFile)) {
     </div>
 
     <div class="card card-outline card-secondary mt-3">
-        <div class="card-header" data-toggle="collapse" data-target="#devToolsBody" style="cursor:pointer">
+        <div class="card-header">
             <h3 class="card-title"><i class="fas fa-bug"></i> Developer Tools</h3>
             <div class="card-tools">
-                <i class="fas fa-chevron-down"></i>
+                <button type="button" class="btn btn-tool" data-card-widget="collapse">
+                    <i class="fas fa-minus"></i>
+                </button>
             </div>
         </div>
-        <div class="card-body collapse" id="devToolsBody">
-            <div class="form-group row align-items-center mb-3">
-                <label class="col-sm-3 col-form-label font-weight-bold">Debug Logging</label>
+        <div class="card-body">
+            <div class="row mb-3">
+                <div class="col-sm-3"><strong>Debug Logging</strong></div>
                 <div class="col-sm-9">
-                    <div class="custom-control custom-switch">
-                        <input type="checkbox" class="custom-control-input" id="debugToggle" onchange="toggleDebug()">
-                        <label class="custom-control-label" for="debugToggle">
-                            Write DEBUG entries to <code>/home/fpp/media/logs/fpp-TuyaBridge.log</code>
-                        </label>
-                    </div>
-                    <small class="text-muted">
+                    <label style="font-weight:normal;cursor:pointer">
+                        <input type="checkbox" id="debugToggle" onchange="toggleDebug()">
+                        &nbsp;Enable debug logging to
+                        <code>/home/fpp/media/logs/fpp-TuyaBridge.log</code>
+                    </label>
+                    <div class="text-muted" style="font-size:12px;margin-top:4px">
                         Takes effect immediately — no fppd restart needed.
-                        When enabled, every command sent to a device is logged with its full DPS payload
-                        and packet hex. If a device is not found, the log will list what names are actually loaded.
-                    </small>
+                        Logs every command with device name, DPS payload, and raw packet bytes.
+                        When a device is not found, lists all names currently loaded by the plugin.
+                    </div>
                 </div>
             </div>
-            <div class="form-group row">
-                <label class="col-sm-3 col-form-label font-weight-bold">Plugin Log</label>
+            <div class="row">
+                <div class="col-sm-3"><strong>Plugin Log</strong></div>
                 <div class="col-sm-9">
-                    <div class="mb-1">
+                    <div style="margin-bottom:6px">
                         <button class="btn btn-sm btn-secondary" onclick="refreshLog()">
                             <i class="fas fa-sync"></i> Refresh
                         </button>
-                        <button class="btn btn-sm btn-outline-secondary ml-1" onclick="clearLogView()">
+                        <button class="btn btn-sm btn-default ml-1" onclick="clearLogView()">
                             <i class="fas fa-times"></i> Clear View
                         </button>
-                        <span class="text-muted small ml-2">Last 200 lines of fpp-TuyaBridge.log</span>
+                        <span class="text-muted" style="font-size:12px;margin-left:8px">
+                            Last 200 lines of fpp-TuyaBridge.log
+                        </span>
                     </div>
-                    <pre id="pluginLog" style="max-height:320px;overflow-y:auto;background:#1a1a1a;color:#d4d4d4;font-size:11px;padding:10px;border-radius:4px;border:1px solid #444;">(click Refresh to load log)</pre>
+                    <pre id="pluginLog" style="max-height:320px;overflow-y:auto;background:#1a1a1a;color:#d4d4d4;font-size:11px;padding:10px;border-radius:4px;border:1px solid #444;white-space:pre-wrap;word-break:break-all">(click Refresh to load log)</pre>
                 </div>
             </div>
         </div>

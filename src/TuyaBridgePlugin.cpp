@@ -85,6 +85,8 @@ public:
         if (a.size() < 2)
             return std::make_unique<ErrorResult>("Usage: device state");
 
+        TuyaLog::debug("SetSwitch  device='%s'  state='%s'", a[0].c_str(), a[1].c_str());
+
         TuyaDevice* dev = m_plugin->findDevice(a[0]);
         if (!dev) {
             TuyaLog::err("SetSwitch: device not found: %s", a[0].c_str());
@@ -131,6 +133,8 @@ public:
         if (a.size() < 2)
             return std::make_unique<ErrorResult>("Usage: device brightness");
 
+        TuyaLog::debug("SetDimmer  device='%s'  brightness=%s", a[0].c_str(), a[1].c_str());
+
         TuyaDevice* dev = m_plugin->findDevice(a[0]);
         if (!dev) {
             TuyaLog::err("SetDimmer: device not found: %s", a[0].c_str());
@@ -165,9 +169,14 @@ public:
         if (a.size() < 4)
             return std::make_unique<ErrorResult>("Usage: device R G B");
 
+        TuyaLog::debug("SetColor   device='%s'  R=%s G=%s B=%s",
+                       a[0].c_str(), a[1].c_str(), a[2].c_str(), a[3].c_str());
+
         TuyaDevice* dev = m_plugin->findDevice(a[0]);
-        if (!dev)
+        if (!dev) {
+            TuyaLog::err("SetColor: device not found: %s", a[0].c_str());
             return std::make_unique<ErrorResult>("Device not found: " + a[0]);
+        }
 
         auto clamp255 = [](int v) { return static_cast<uint8_t>(std::clamp(v, 0, 255)); };
         uint8_t r = clamp255(std::stoi(a[1]));
@@ -202,6 +211,9 @@ public:
     std::unique_ptr<Result> run(const std::vector<std::string>& a) override {
         if (a.size() < 3)
             return std::make_unique<ErrorResult>("Usage: device dps_key value");
+
+        TuyaLog::debug("SendDPS    device='%s'  key='%s'  value='%s'",
+                       a[0].c_str(), a[1].c_str(), a[2].c_str());
 
         TuyaDevice* dev = m_plugin->findDevice(a[0]);
         if (!dev) {

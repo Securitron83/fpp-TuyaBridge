@@ -139,10 +139,11 @@ bool TuyaDevice::sendJson(const Json::Value& dps) {
     // Caller must hold m_mutex
 
     // Standard Tuya local protocol SET payload.
-    // gwId is required by many devices and must match devId — omitting it causes
-    // silent rejection on a large number of Tuya firmware versions.
+    // Match tuyapi/pytuya: devId + uid + t + dps only.
+    // gwId is intentionally omitted — it inflates the JSON beyond the firmware's
+    // parser buffer on compact devices (fans, simple switches), causing
+    // "parse data error" even when all DPS values are correct.
     Json::Value payload;
-    payload["gwId"]  = m_deviceId;
     payload["devId"] = m_deviceId;
     payload["uid"]   = m_deviceId;
     payload["t"]     = std::to_string(std::time(nullptr));

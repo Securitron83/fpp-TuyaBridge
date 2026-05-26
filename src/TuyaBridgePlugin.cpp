@@ -320,6 +320,21 @@ void TuyaBridgePlugin::loadDevices(const std::string& confPath) {
         m_devices.push_back(std::make_unique<TuyaDevice>(
             name, ip, id, key, version, TuyaDevice::typeFromString(type)));
 
+        // Load optional DPS definitions (id + friendly name pairs)
+        const Json::Value& dpsArr = entry["dps"];
+        if (dpsArr.isArray() && !dpsArr.empty()) {
+            std::vector<TuyaDevice::DpsDef> defs;
+            for (const auto& dp : dpsArr) {
+                std::string dpId   = dp.get("id",   "").asString();
+                std::string dpName = dp.get("name", "").asString();
+                if (!dpId.empty())
+                    defs.push_back({dpId, dpName});
+            }
+            size_t numDefs = defs.size();
+            m_devices.back()->setDpsDefs(std::move(defs));
+            TuyaLog::info("  device '%s': loaded %zu DPS definition(s)", name.c_str(), numDefs);
+        }
+
         LogInfo(VB_PLUGIN, "TuyaBridge: loaded device '%s' (%s) v%s\n",
                 name.c_str(), ip.c_str(), version.c_str());
         TuyaLog::info("Loaded device '%s' at %s version %s type %s",

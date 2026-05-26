@@ -45,6 +45,105 @@ if (file_exists($devicesFile)) {
         </div>
     </div>
 
+    <!-- DPS Inspector -->
+    <div class="card card-outline card-info mt-3">
+        <div class="card-header">
+            <h3 class="card-title"><i class="fas fa-search"></i> DPS Inspector</h3>
+            <div class="card-tools">
+                <button type="button" class="btn btn-tool" data-card-widget="collapse">
+                    <i class="fas fa-minus"></i>
+                </button>
+            </div>
+        </div>
+        <div class="card-body">
+            <p class="text-muted small mb-3">
+                Query a device live to discover its datapoint IDs, current values, and types.
+                Assign friendly names, then save them to <code>devices.conf</code> so they appear
+                in the <em>Send DPS</em> dropdown below.
+            </p>
+            <div class="form-group row mb-2">
+                <label class="col-sm-2 col-form-label col-form-label-sm"><strong>Device</strong></label>
+                <div class="col-sm-10">
+                    <select id="dpsInspectorDevice" class="form-control form-control-sm" style="max-width:260px;display:inline-block">
+                        <option value="">— select device —</option>
+                    </select>
+                    <button class="btn btn-info btn-sm ml-2" onclick="queryDpsDevice()">
+                        <i class="fas fa-search"></i> Query Device
+                    </button>
+                    <span id="dpsQueryStatus" class="text-muted small ml-2"></span>
+                </div>
+            </div>
+            <div id="dpsResultsSection" style="display:none">
+                <table class="table table-sm table-bordered table-hover mt-2" style="max-width:680px">
+                    <thead class="thead-light">
+                        <tr>
+                            <th style="width:80px">DPS ID</th>
+                            <th style="width:130px">Current Value</th>
+                            <th style="width:80px">Type</th>
+                            <th>Friendly Name</th>
+                        </tr>
+                    </thead>
+                    <tbody id="dpsResultsBody"></tbody>
+                </table>
+                <button class="btn btn-success btn-sm" onclick="saveDpsDefs()">
+                    <i class="fas fa-save"></i> Save Definitions to Config
+                </button>
+                <span class="text-muted small ml-2">Saves names to devices.conf; no fppd restart needed for the Send DPS panel.</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Send DPS (live test from browser) -->
+    <div class="card card-outline card-warning mt-3">
+        <div class="card-header">
+            <h3 class="card-title"><i class="fas fa-paper-plane"></i> Send DPS</h3>
+            <div class="card-tools">
+                <button type="button" class="btn btn-tool" data-card-widget="collapse">
+                    <i class="fas fa-minus"></i>
+                </button>
+            </div>
+        </div>
+        <div class="card-body">
+            <p class="text-muted small mb-3">
+                Send a DPS command directly from the browser for quick testing.
+                Use the Inspector above to discover DPS IDs and save friendly names.
+            </p>
+            <div class="form-group row mb-2">
+                <label class="col-sm-2 col-form-label col-form-label-sm"><strong>Device</strong></label>
+                <div class="col-sm-10">
+                    <select id="sendDpsDevice" class="form-control form-control-sm" style="max-width:260px" onchange="onSendDpsDeviceChange()">
+                        <option value="">— select device —</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-group row mb-2">
+                <label class="col-sm-2 col-form-label col-form-label-sm"><strong>DPS</strong></label>
+                <div class="col-sm-10">
+                    <select id="sendDpsKey" class="form-control form-control-sm mb-1" style="max-width:260px">
+                        <option value="">— select named DPS —</option>
+                    </select>
+                    <input type="text" id="sendDpsKeyText" class="form-control form-control-sm" style="max-width:260px"
+                           placeholder="…or type DPS ID directly (e.g. 1, 3, 15)">
+                </div>
+            </div>
+            <div class="form-group row mb-2">
+                <label class="col-sm-2 col-form-label col-form-label-sm"><strong>Value</strong></label>
+                <div class="col-sm-10">
+                    <input type="text" id="sendDpsValue" class="form-control form-control-sm" style="max-width:260px"
+                           placeholder="true / false / 1 / 2 / 3 …">
+                </div>
+            </div>
+            <div class="form-group row">
+                <div class="col-sm-10 offset-sm-2">
+                    <button class="btn btn-warning btn-sm" onclick="sendDpsCommand()">
+                        <i class="fas fa-paper-plane"></i> Send
+                    </button>
+                    <span id="sendDpsStatus" class="ml-2 small"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="card card-outline card-secondary mt-3">
         <div class="card-header">
             <h3 class="card-title"><i class="fas fa-bug"></i> Developer Tools</h3>
@@ -187,8 +286,140 @@ function loadDebugState() {
     }, 'json');
 }
 
+// ---------------------------------------------------------------------------
+// DPS Inspector
+// ---------------------------------------------------------------------------
+
+function populateDeviceDropdowns() {
+    const opts = '<option value="">— select device —</option>' +
+        devices.map(d => `<option value="${escapeHtml(d.name || '')}">${escapeHtml(d.name || '')}</option>`).join('');
+    $('#dpsInspectorDevice, #sendDpsDevice').html(opts);
+    onSendDpsDeviceChange();
+}
+
+function queryDpsDevice() {
+    const name = $('#dpsInspectorDevice').val();
+    if (!name) { alert('Select a device first.'); return; }
+
+    $('#dpsQueryStatus').text('Querying…');
+    $('#dpsResultsSection').hide();
+
+    // Pull any previously saved DPS names for pre-filling the name column
+    const dev = devices.find(d => d.name === name) || {};
+    const savedDps = dev.dps || [];
+
+    $.post(PLUGIN_API + '&command=queryDevice', { name: name }, function(r) {
+        if (r.error) {
+            $('#dpsQueryStatus').html('<span class="text-danger">' + escapeHtml(r.error) + '</span>');
+            return;
+        }
+
+        let rows = '';
+        Object.entries(r.dps).sort((a, b) => Number(a[0]) - Number(b[0])).forEach(([id, val]) => {
+            const type    = typeof val === 'boolean' ? 'boolean'
+                          : typeof val === 'number'  ? 'integer' : 'string';
+            const badge   = type === 'boolean' ? 'badge-primary'
+                          : type === 'integer' ? 'badge-success' : 'badge-secondary';
+            const display = String(val);
+            const saved   = savedDps.find(s => s.id === id);
+            const name_   = saved ? escapeHtml(saved.name) : '';
+            rows += `<tr>
+                <td><code>${escapeHtml(id)}</code></td>
+                <td><code>${escapeHtml(display)}</code></td>
+                <td><span class="badge ${badge}">${type}</span></td>
+                <td><input type="text" class="form-control form-control-sm dps-name-input"
+                           data-dps-id="${escapeHtml(id)}" value="${name_}"
+                           placeholder="e.g. Power, Light, Fan Speed"></td>
+            </tr>`;
+        });
+
+        $('#dpsResultsBody').html(rows);
+        $('#dpsResultsSection').show();
+        $('#dpsQueryStatus').html('<span class="text-success">Found ' + Object.keys(r.dps).length + ' DPS value(s).</span>');
+    }, 'json').fail(function(xhr) {
+        $('#dpsQueryStatus').html('<span class="text-danger">Request failed — check the log for details.</span>');
+        console.error('queryDevice error:', xhr.status, xhr.responseText);
+    });
+}
+
+function saveDpsDefs() {
+    const name = $('#dpsInspectorDevice').val();
+    if (!name) return;
+
+    const dpsArray = [];
+    $('.dps-name-input').each(function() {
+        dpsArray.push({ id: $(this).data('dps-id'), name: $(this).val().trim() });
+    });
+
+    $.post(PLUGIN_API + '&command=saveDpsDefs', { name: name, dps: JSON.stringify(dpsArray) }, function(r) {
+        if (r.error) {
+            $.jGrowl('Save failed: ' + r.error, { theme: 'danger' });
+            return;
+        }
+        $.jGrowl('DPS definitions saved for ' + escapeHtml(name), { theme: 'success' });
+        // Update local devices array so Send DPS dropdown refreshes immediately
+        const dev = devices.find(d => d.name === name);
+        if (dev) dev.dps = dpsArray;
+        onSendDpsDeviceChange();
+    }, 'json').fail(function() {
+        $.jGrowl('Failed to save DPS definitions.', { theme: 'danger' });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Send DPS (browser-side test)
+// ---------------------------------------------------------------------------
+
+function onSendDpsDeviceChange() {
+    const name = $('#sendDpsDevice').val();
+    if (!name) {
+        $('#sendDpsKey').html('<option value="">— select named DPS —</option>');
+        return;
+    }
+    const dev    = devices.find(d => d.name === name) || {};
+    const saved  = dev.dps || [];
+    let opts = '<option value="">— select named DPS —</option>';
+    if (saved.length > 0) {
+        saved.forEach(dp => {
+            const label = dp.name ? `${dp.id} — ${dp.name}` : dp.id;
+            opts += `<option value="${escapeHtml(dp.id)}">${escapeHtml(label)}</option>`;
+        });
+    } else {
+        opts += '<option disabled>(no saved DPS defs — use Inspector above to discover &amp; name them)</option>';
+    }
+    $('#sendDpsKey').html(opts);
+}
+
+function sendDpsCommand() {
+    const name  = $('#sendDpsDevice').val();
+    const keyDd = $('#sendDpsKey').val();
+    const keyTx = $('#sendDpsKeyText').val().trim();
+    const key   = keyDd || keyTx;
+    const value = $('#sendDpsValue').val().trim();
+
+    if (!name)  { alert('Select a device.'); return; }
+    if (!key)   { alert('Select a DPS from the dropdown or type an ID.'); return; }
+    if (value === '') { alert('Enter a value.'); return; }
+
+    $('#sendDpsStatus').html('<span class="text-muted">Sending…</span>');
+
+    $.post(PLUGIN_API + '&command=sendDps', { name: name, key: key, value: value }, function(r) {
+        if (r.status === 'ok') {
+            $('#sendDpsStatus').html('<span class="text-success"><i class="fas fa-check"></i> Sent OK</span>');
+        } else {
+            const detail = r.detail ? (' — ' + r.detail) : '';
+            $('#sendDpsStatus').html('<span class="text-danger">Error (retcode 0x' +
+                (r.retcode >>> 0).toString(16).toUpperCase().padStart(8,'0') + detail + ')</span>');
+        }
+    }, 'json').fail(function(xhr) {
+        $('#sendDpsStatus').html('<span class="text-danger">Request failed.</span>');
+        console.error('sendDps error:', xhr.status, xhr.responseText);
+    });
+}
+
 $(document).ready(function() {
     renderTable();
     loadDebugState();
+    populateDeviceDropdowns();
 });
 </script>

@@ -20,6 +20,11 @@ public:
         GENERIC,
     };
 
+    struct DpsDef {
+        std::string id;    // DPS ID as string, e.g. "1", "15"
+        std::string name;  // Friendly name, e.g. "Power", "Light"
+    };
+
     TuyaDevice(const std::string& name,
                const std::string& ip,
                const std::string& deviceId,
@@ -37,6 +42,9 @@ public:
     const std::string& getVersion() const { return m_version; }
     Type               getType()    const { return m_type; }
     bool               isConnected() const;
+
+    void setDpsDefs(std::vector<DpsDef> defs) { m_dpsDefs = std::move(defs); }
+    const std::vector<DpsDef>& getDpsDefs() const { return m_dpsDefs; }
 
     // Attempt TCP connection to the device. Returns false on failure.
     bool connect();
@@ -69,6 +77,7 @@ private:
     int      m_sock     = -1;
     uint32_t m_sequence = 0;
     mutable std::mutex m_mutex;
+    std::vector<DpsDef> m_dpsDefs;
 
     bool ensureConnected();
     bool sendJson(const Json::Value& payload);

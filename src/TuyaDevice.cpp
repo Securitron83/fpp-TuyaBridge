@@ -154,15 +154,11 @@ bool TuyaDevice::sendJson(const Json::Value& dps) {
         "\",\"t\":\""    + std::to_string(std::time(nullptr)) +
         "\",\"dps\":"    + dpsStr + "}";
 
-    if (TuyaLog::debugEnabled())
-        TuyaLog::debug("JSON payload: %s", jsonStr.c_str());
-
-    // Debug: log each DPS key in MQTT-topic style so output is directly
-    // comparable to the old tuya-mqtt format: tuya/{name}/dps/{key}/command
     if (TuyaLog::debugEnabled()) {
         TuyaLog::debug("--- sending to device '%s'  id=%s  ip=%s  ver=%s ---",
                        m_name.c_str(), m_deviceId.c_str(),
                        m_ip.c_str(), m_version.c_str());
+        TuyaLog::debug("JSON payload: %s", jsonStr.c_str());
         for (const auto& key : dps.getMemberNames()) {
             const Json::Value& val = dps[key];
             std::string valStr;

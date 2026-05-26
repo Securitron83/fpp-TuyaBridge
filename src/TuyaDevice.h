@@ -34,6 +34,7 @@ public:
 
     const std::string& getName()    const { return m_name; }
     const std::string& getIp()      const { return m_ip; }
+    const std::string& getVersion() const { return m_version; }
     Type               getType()    const { return m_type; }
     bool               isConnected() const;
 

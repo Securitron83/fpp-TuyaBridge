@@ -4,6 +4,10 @@
  * Appends timestamped lines to /home/fpp/media/logs/fpp-TuyaBridge.log
  * (or $FPPDIR_MEDIA/logs/fpp-TuyaBridge.log if the env var is set).
  * Thread-safe; each write opens, appends, and closes the file.
+ *
+ * Debug mode: create /home/fpp/media/plugins/fpp-TuyaBridge/debug.flag
+ * (toggle from the Developer Tools panel in the Tuya Bridge UI).
+ * TuyaLog::debug() is a no-op when the flag file is absent.
  */
 #include <cstdarg>
 #include <cstdio>
@@ -11,6 +15,7 @@
 #include <ctime>
 #include <mutex>
 #include <string>
+#include <unistd.h>
 
 namespace TuyaLog {
 
@@ -42,6 +47,16 @@ inline void write(const char* level, const char* fmt, va_list ap) {
 
 } // namespace detail
 
+// Returns true when the debug flag file exists.
+// Checked on every TuyaLog::debug() call so toggling from the UI takes effect
+// immediately without restarting fppd.
+inline bool debugEnabled() {
+    const char* media = getenv("FPPDIR_MEDIA");
+    std::string flag  = std::string(media ? media : "/home/fpp/media")
+                        + "/plugins/fpp-TuyaBridge/debug.flag";
+    return access(flag.c_str(), F_OK) == 0;
+}
+
 inline void info(const char* fmt, ...) {
     va_list a; va_start(a, fmt);
     detail::write("INFO",  fmt, a);
@@ -57,6 +72,13 @@ inline void warn(const char* fmt, ...) {
 inline void err(const char* fmt, ...) {
     va_list a; va_start(a, fmt);
     detail::write("ERROR", fmt, a);
+    va_end(a);
+}
+
+inline void debug(const char* fmt, ...) {
+    if (!debugEnabled()) return;
+    va_list a; va_start(a, fmt);
+    detail::write("DEBUG", fmt, a);
     va_end(a);
 }
 

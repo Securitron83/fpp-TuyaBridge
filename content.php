@@ -44,6 +44,48 @@ if (file_exists($devicesFile)) {
             </button>
         </div>
     </div>
+
+    <div class="card card-outline card-secondary mt-3">
+        <div class="card-header" data-toggle="collapse" data-target="#devToolsBody" style="cursor:pointer">
+            <h3 class="card-title"><i class="fas fa-bug"></i> Developer Tools</h3>
+            <div class="card-tools">
+                <i class="fas fa-chevron-down"></i>
+            </div>
+        </div>
+        <div class="card-body collapse" id="devToolsBody">
+            <div class="form-group row align-items-center mb-3">
+                <label class="col-sm-3 col-form-label font-weight-bold">Debug Logging</label>
+                <div class="col-sm-9">
+                    <div class="custom-control custom-switch">
+                        <input type="checkbox" class="custom-control-input" id="debugToggle" onchange="toggleDebug()">
+                        <label class="custom-control-label" for="debugToggle">
+                            Write DEBUG entries to <code>/home/fpp/media/logs/fpp-TuyaBridge.log</code>
+                        </label>
+                    </div>
+                    <small class="text-muted">
+                        Takes effect immediately — no fppd restart needed.
+                        When enabled, every command sent to a device is logged with its full DPS payload
+                        and packet hex. If a device is not found, the log will list what names are actually loaded.
+                    </small>
+                </div>
+            </div>
+            <div class="form-group row">
+                <label class="col-sm-3 col-form-label font-weight-bold">Plugin Log</label>
+                <div class="col-sm-9">
+                    <div class="mb-1">
+                        <button class="btn btn-sm btn-secondary" onclick="refreshLog()">
+                            <i class="fas fa-sync"></i> Refresh
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary ml-1" onclick="clearLogView()">
+                            <i class="fas fa-times"></i> Clear View
+                        </button>
+                        <span class="text-muted small ml-2">Last 200 lines of fpp-TuyaBridge.log</span>
+                    </div>
+                    <pre id="pluginLog" style="max-height:320px;overflow-y:auto;background:#1a1a1a;color:#d4d4d4;font-size:11px;padding:10px;border-radius:4px;border:1px solid #444;">(click Refresh to load log)</pre>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -110,5 +152,40 @@ function saveDevices() {
     });
 }
 
-$(document).ready(function() { renderTable(); });
+function toggleDebug() {
+    var enabling = $('#debugToggle').is(':checked');
+    $.post(PLUGIN_API + '&command=toggleDebug', {}, function(r) {
+        $('#debugToggle').prop('checked', r.debug);
+        $.jGrowl('Debug logging ' + (r.debug ? 'enabled' : 'disabled'), { theme: 'success' });
+        if (r.debug) refreshLog();
+    }, 'json').fail(function() {
+        $('#debugToggle').prop('checked', !enabling); // revert
+        $.jGrowl('Could not toggle debug mode.', { theme: 'danger' });
+    });
+}
+
+function refreshLog() {
+    $.get(PLUGIN_API + '&command=getLog', function(r) {
+        $('#pluginLog').text(r.log || '(empty)');
+        var el = document.getElementById('pluginLog');
+        el.scrollTop = el.scrollHeight;
+    }, 'json').fail(function() {
+        $('#pluginLog').text('(failed to fetch log)');
+    });
+}
+
+function clearLogView() {
+    $('#pluginLog').text('(cleared — click Refresh to reload)');
+}
+
+function loadDebugState() {
+    $.get(PLUGIN_API + '&command=getDebugState', function(r) {
+        $('#debugToggle').prop('checked', r.debug === true);
+    }, 'json');
+}
+
+$(document).ready(function() {
+    renderTable();
+    loadDebugState();
+});
 </script>

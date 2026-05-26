@@ -343,6 +343,15 @@ void TuyaBridgePlugin::registerCommands() {
     LogInfo(VB_PLUGIN, "TuyaBridge: registered %zu commands\n", m_commandsRegistered.size());
     TuyaLog::info("Registered %zu commands for %zu device(s)",
                   m_commandsRegistered.size(), m_devices.size());
+
+    if (TuyaLog::debugEnabled()) {
+        TuyaLog::debug("Loaded device names (use exactly these in FPP commands):");
+        for (const auto& d : m_devices)
+            TuyaLog::debug("  name='%s'  ip=%s  ver=%s  type=%s",
+                           d->getName().c_str(), d->getIp().c_str(),
+                           d->getVersion().c_str(),
+                           TuyaDevice::typeToString(d->getType()).c_str());
+    }
 }
 
 void TuyaBridgePlugin::unregisterCommands() {
@@ -355,6 +364,17 @@ TuyaDevice* TuyaBridgePlugin::findDevice(const std::string& name) const {
     for (const auto& d : m_devices)
         if (d->getName() == name)
             return d.get();
+
+    if (TuyaLog::debugEnabled()) {
+        TuyaLog::debug("findDevice: '%s' not found — %zu device(s) loaded:",
+                       name.c_str(), m_devices.size());
+        if (m_devices.empty()) {
+            TuyaLog::debug("  (none — was devices.conf saved before fppd started?)");
+        } else {
+            for (const auto& d : m_devices)
+                TuyaLog::debug("  name='%s'  ip=%s", d->getName().c_str(), d->getIp().c_str());
+        }
+    }
     return nullptr;
 }
 

@@ -81,6 +81,40 @@ switch ($command) {
         echo json_encode($names);
         break;
 
+    case 'getDebugState':
+        $flagFile = $mediaDir . '/plugins/fpp-TuyaBridge/debug.flag';
+        header('Content-Type: application/json');
+        echo json_encode(['debug' => file_exists($flagFile)]);
+        break;
+
+    case 'toggleDebug':
+        $flagFile = $mediaDir . '/plugins/fpp-TuyaBridge/debug.flag';
+        if (file_exists($flagFile)) {
+            unlink($flagFile);
+            tuyaLog("Debug mode disabled via UI");
+            echo json_encode(['debug' => false]);
+        } else {
+            touch($flagFile);
+            tuyaLog("Debug mode enabled via UI");
+            echo json_encode(['debug' => true]);
+        }
+        break;
+
+    case 'getLog':
+        $maxLines = min(intval($_GET['lines'] ?? 200), 500);
+        header('Content-Type: application/json');
+        if (!file_exists($logFile)) {
+            echo json_encode(['log' => '(log file not yet created — save a device or send a command first)']);
+            break;
+        }
+        $lines = file($logFile, FILE_IGNORE_NEW_LINES);
+        if ($lines === false) {
+            echo json_encode(['log' => '(could not read log file)']);
+            break;
+        }
+        echo json_encode(['log' => implode("\n", array_slice($lines, -$maxLines))]);
+        break;
+
     default:
         http_response_code(400);
         echo json_encode(['error' => 'Unknown command']);

@@ -97,6 +97,18 @@ bool TuyaDevice::sendPacket(const std::vector<uint8_t>& packet) {
     // Caller must hold m_mutex
     if (m_sock < 0) return false;
 
+    if (TuyaLog::debugEnabled()) {
+        std::string hex;
+        hex.reserve(packet.size() * 3 + packet.size() / 4);
+        char buf[3];
+        for (size_t i = 0; i < packet.size(); i++) {
+            snprintf(buf, sizeof(buf), "%02X", packet[i]);
+            hex += buf;
+            hex += ((i + 1) % 4 == 0) ? ' ' : ':';
+        }
+        TuyaLog::debug("tuya/%s/packet  %zu bytes: %s", m_name.c_str(), packet.size(), hex.c_str());
+    }
+
     ssize_t sent = ::send(m_sock, packet.data(), packet.size(), MSG_NOSIGNAL);
     if (sent != static_cast<ssize_t>(packet.size())) {
         TuyaLog::err("Device '%s': send failed (sent %zd of %zu bytes): %s",
@@ -127,6 +139,14 @@ bool TuyaDevice::sendJson(const Json::Value& dps) {
     Json::StreamWriterBuilder wb;
     wb["indentation"] = "";
     std::string jsonStr = Json::writeString(wb, payload);
+
+    // Debug: log DPS in a format similar to the MQTT topic style
+    if (TuyaLog::debugEnabled()) {
+        std::string dpsStr = Json::writeString(wb, dps);
+        TuyaLog::debug("tuya/%s/dps/set  device=%s ip=%s ver=%s  payload=%s",
+                       m_name.c_str(), m_deviceId.c_str(),
+                       m_ip.c_str(), m_version.c_str(), dpsStr.c_str());
+    }
 
     std::vector<uint8_t> pkt;
     if (m_version == "3.3") {

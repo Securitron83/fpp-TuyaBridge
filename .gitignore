@@ -9,6 +9,9 @@ src/*.o
 # Device config — contains local keys, never commit
 devices.conf
 
+# Debug mode flag — runtime state, not source
+debug.flag
+
 # Legacy Node.js files (replaced by C++ plugin)
 tuya-mqtt.js
 config.js

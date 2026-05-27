@@ -32,7 +32,6 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -200,35 +199,45 @@ private:
 // Value is parsed as JSON so booleans (true/false), integers, and strings all work.
 class TuyaDpsCommand : public Command {
 public:
-    explicit TuyaDpsCommand(TuyaBridgePlugin* plugin)
-        : Command("Tuya Bridge - Send DPS",
-                  "Send a raw DPS key/value pair to any Tuya device"),
-          m_plugin(plugin) {
-        args.emplace_back("Device",  "string", "Device name from devices.conf");
-        args.emplace_back("DPS Key", "string", "Datapoint key, e.g. 1, 20, 24");
-        args.emplace_back("Value",   "string", "Value: true, false, 0-1000, or a string");
+    // deviceName="" → generic command: args are Device, DPS Key, Value
+    // deviceName set → per-device command: args are DPS Key, Value (device is implicit)
+    explicit TuyaDpsCommand(TuyaBridgePlugin* plugin, const std::string& deviceName = "")
+        : Command(deviceName.empty()
+                    ? "Tuya Bridge - Send DPS"
+                    : ("Tuya Bridge - Send DPS [" + deviceName + "]"),
+                  "Send a raw DPS key/value pair to a Tuya device"),
+          m_plugin(plugin), m_deviceName(deviceName) {
+        if (deviceName.empty())
+            args.emplace_back("Device",  "string", "Device name from devices.conf");
+        args.emplace_back("DPS Key", "string", "Datapoint key, e.g. 1, 3, 15");
+        args.emplace_back("Value",   "string", "Value: true, false, or an integer");
     }
 
     std::unique_ptr<Result> run(const std::vector<std::string>& a) override {
-        if (a.size() < 3)
-            return std::make_unique<ErrorResult>("Usage: device dps_key value");
+        const size_t minArgs = m_deviceName.empty() ? 3 : 2;
+        if (a.size() < minArgs)
+            return std::make_unique<ErrorResult>("Usage: [device] dps_key value");
+
+        auto it = a.begin();
+        const std::string devName = m_deviceName.empty() ? *it++ : m_deviceName;
 
         // Key may be "1 (Power)" when selected from the dropdown — strip the suffix
-        std::string dpsKey = a[1];
+        std::string dpsKey = *it++;
         auto spPos = dpsKey.find(' ');
         if (spPos != std::string::npos)
             dpsKey = dpsKey.substr(0, spPos);
 
-        TuyaLog::debug("SendDPS    device='%s'  key='%s'  value='%s'",
-                       a[0].c_str(), dpsKey.c_str(), a[2].c_str());
+        const std::string& valStr = *it;
 
-        TuyaDevice* dev = m_plugin->findDevice(a[0]);
+        TuyaLog::debug("SendDPS    device='%s'  key='%s'  value='%s'",
+                       devName.c_str(), dpsKey.c_str(), valStr.c_str());
+
+        TuyaDevice* dev = m_plugin->findDevice(devName);
         if (!dev) {
-            TuyaLog::err("SendDPS: device not found: %s", a[0].c_str());
-            return std::make_unique<ErrorResult>("Device not found: " + a[0]);
+            TuyaLog::err("SendDPS: device not found: %s", devName.c_str());
+            return std::make_unique<ErrorResult>("Device not found: " + devName);
         }
 
-        const std::string& valStr = a[2];
         Json::Value dps;
 
         // Parse value: true/false → bool, integer string → int, else string
@@ -249,14 +258,15 @@ public:
 
         if (!dev->sendRawDps(dps)) {
             TuyaLog::err("SendDPS: send failed for device %s (key=%s val=%s)",
-                         a[0].c_str(), a[1].c_str(), a[2].c_str());
-            return std::make_unique<ErrorResult>("Send failed for device: " + a[0]);
+                         devName.c_str(), dpsKey.c_str(), valStr.c_str());
+            return std::make_unique<ErrorResult>("Send failed for device: " + devName);
         }
         return std::make_unique<Result>("OK");
     }
 
 private:
     TuyaBridgePlugin* m_plugin;
+    std::string       m_deviceName;
 };
 
 // ---------------------------------------------------------------------------
@@ -358,41 +368,42 @@ void TuyaBridgePlugin::registerCommands() {
     auto* sw  = new TuyaSwitchCommand(this);
     auto* dim = new TuyaDimmerCommand(this);
     auto* col = new TuyaColorCommand(this);
-    auto* dps = new TuyaDpsCommand(this);
 
     // Populate the device dropdown in each command
     if (!names.empty()) {
         sw->args.front().setContentList(names);
         dim->args.front().setContentList(names);
         col->args.front().setContentList(names);
-        dps->args.front().setContentList(names);
-    }
-
-    // Populate the DPS Key dropdown with named definitions from all devices.
-    // Format: "ID (Name)" when a friendly name exists, else just "ID".
-    // IDs are deduplicated — first device that defines an ID wins.
-    {
-        std::set<std::string> seen;
-        std::vector<std::string> dpsKeys;
-        for (const auto& d : m_devices) {
-            for (const auto& def : d->getDpsDefs()) {
-                if (seen.insert(def.id).second) {
-                    dpsKeys.push_back(def.name.empty()
-                        ? def.id
-                        : (def.id + " (" + def.name + ")"));
-                }
-            }
-        }
-        if (!dpsKeys.empty())
-            std::next(dps->args.begin())->setContentList(dpsKeys);
     }
 
     CommandManager::INSTANCE.addCommand(sw);
     CommandManager::INSTANCE.addCommand(dim);
     CommandManager::INSTANCE.addCommand(col);
-    CommandManager::INSTANCE.addCommand(dps);
+    m_commandsRegistered = {sw->name, dim->name, col->name};
 
-    m_commandsRegistered = {sw->name, dim->name, col->name, dps->name};
+    // Register one per-device DPS command for every device that has saved DPS defs.
+    // These commands embed the device name so the DPS key dropdown is device-specific.
+    for (const auto& d : m_devices) {
+        const auto& defs = d->getDpsDefs();
+        if (defs.empty()) continue;
+
+        std::vector<std::string> dpsKeys;
+        for (const auto& def : defs)
+            dpsKeys.push_back(def.name.empty() ? def.id : (def.id + " (" + def.name + ")"));
+
+        auto* dps = new TuyaDpsCommand(this, d->getName());
+        dps->args.front().setContentList(dpsKeys);  // arg 0 is DPS Key in per-device mode
+        CommandManager::INSTANCE.addCommand(dps);
+        m_commandsRegistered.push_back(dps->name);
+    }
+
+    // Always register the generic command as a fallback (works with any device,
+    // free-text DPS key — useful for scripting or devices without saved defs).
+    auto* dpsGeneric = new TuyaDpsCommand(this);
+    if (!names.empty())
+        dpsGeneric->args.front().setContentList(names);  // arg 0 is Device in generic mode
+    CommandManager::INSTANCE.addCommand(dpsGeneric);
+    m_commandsRegistered.push_back(dpsGeneric->name);
     LogInfo(VB_PLUGIN, "TuyaBridge: registered %zu commands\n", m_commandsRegistered.size());
     TuyaLog::info("Registered %zu commands for %zu device(s)",
                   m_commandsRegistered.size(), m_devices.size());

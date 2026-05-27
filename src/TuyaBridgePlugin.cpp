@@ -384,7 +384,7 @@ void TuyaBridgePlugin::registerCommands() {
             }
         }
         if (!dpsKeys.empty())
-            dps->args[1].setContentList(dpsKeys);
+            std::next(dps->args.begin())->setContentList(dpsKeys);
     }
 
     CommandManager::INSTANCE.addCommand(sw);

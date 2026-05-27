@@ -251,11 +251,16 @@ switch ($command) {
         $debugOn   = file_exists($flagFile);
         $soExists  = file_exists($soFile);
 
+        // Probe whether PHP can write to the log file right now.
+        $testLine  = "[" . date('Y-m-d H:i:s') . "] [PHP  ] getLog: write-test OK (php_uid=" . posix_geteuid() . ")\n";
+        $canWrite  = (@file_put_contents($logFile, $testLine, FILE_APPEND | LOCK_EX) !== false);
+
         // Always prepend a status block so the user can see diagnostics
         // even when the log file is empty or missing.
         $status  = "=== Tuya Bridge Plugin Status ===\n";
         $status .= "Plugin .so : " . ($soExists  ? "OK"                        : "NOT FOUND (build failed?)") . "\n";
         $status .= "Debug mode : " . ($debugOn   ? "ENABLED"                   : "DISABLED — tick the checkbox to enable") . "\n";
+        $status .= "PHP write  : " . ($canWrite  ? "OK"                        : "FAILED — check log file permissions") . "\n";
         $status .= "Log file   : " . (file_exists($logFile)
                         ? "exists (" . number_format(filesize($logFile)) . " bytes)"
                         : "not yet created") . "\n";
@@ -288,6 +293,7 @@ switch ($command) {
     // -----------------------------------------------------------------------
     case 'queryDevice':
         $deviceName = trim($_POST['name'] ?? '');
+        tuyaLog("queryDevice: request for '{$deviceName}'");
 
         $dev = tuyaFindDevice($devicesFile, $deviceName);
         if (!$dev) {
@@ -313,33 +319,57 @@ switch ($command) {
             exit;
         }
 
-        // Connect directly — do NOT drain the greeting.
-        // The device sends a STATUS packet with its full DPS state within ~100 ms.
+        // Connect without draining the greeting.
         $sock = @fsockopen($ip, 6668, $errno, $errstr, 3);
         if (!$sock) {
             tuyaLog("queryDevice: connect to {$ip}:6668 failed for '{$deviceName}': {$errstr}");
             echo json_encode(['error' => "Cannot connect to {$ip}:6668 — is the device online?"]);
             exit;
         }
-        stream_set_timeout($sock, 2);
-        $resp = @fread($sock, 4096);
-        fclose($sock);
 
-        tuyaLog("queryDevice: '{$deviceName}' ({$ip}) — got " . strlen($resp) . " B");
-        tuyaDebug("tuya/{$deviceName}/query-rx  " . strlen($resp) . " bytes: " . tuyaHex($resp));
+        $plain = null;
 
-        // Try STATUS format first (device-initiated, no retcode field)
-        $plain = tuyaDecodeStatus33($resp, $key);
-
-        // Fallback: try RESPONSE format (with retcode) in case firmware varies
-        if ($plain === null || trim($plain) === '') {
-            $result = tuyaDecodeResponse33($resp, $key);
-            if ($result !== null) $plain = $result[0];
+        // Step 1: read greeting with a short 300 ms window.
+        // Many devices broadcast their full DPS state immediately on connect.
+        stream_set_timeout($sock, 0, 300000);
+        $greeting = @fread($sock, 4096);
+        if (strlen($greeting) >= 24) {
+            tuyaDebug("tuya/{$deviceName}/query-greeting  " . strlen($greeting) . " bytes: " . tuyaHex($greeting));
+            $plain = tuyaDecodeStatus33($greeting, $key);
+            if ($plain === null || trim($plain) === '') {
+                $r = tuyaDecodeResponse33($greeting, $key);
+                if ($r !== null) $plain = $r[0];
+            }
         }
 
+        // Step 2: if no greeting or decoding failed, send CMD_QUERY (0x0A).
+        // The device responds in STATUS format (no retcode field) — we try
+        // that first, then fall back to the response format (with retcode).
         if ($plain === null || trim($plain) === '') {
-            tuyaLog("queryDevice: '{$deviceName}' — could not decode response (" . strlen($resp) . " bytes)");
-            echo json_encode(['error' => 'Could not decode response — wrong key, or device did not send status on connect']);
+            $ts      = (string)time();
+            $qpayload = '{"devId":' . json_encode($id) . ',"uid":' . json_encode($id) . ',"t":' . json_encode($ts) . '}';
+            $pkt = tuyaBuildPacket33($key, $qpayload, 0x0A);
+            if ($pkt !== false) {
+                tuyaDebug("tuya/{$deviceName}/query-tx  " . strlen($pkt) . " bytes: " . tuyaHex($pkt));
+                fwrite($sock, $pkt);
+                stream_set_timeout($sock, 2);
+                $resp = @fread($sock, 4096);
+                tuyaLog("queryDevice: '{$deviceName}' ({$ip}) — CMD_QUERY got " . strlen($resp) . " B");
+                tuyaDebug("tuya/{$deviceName}/query-rx  " . strlen($resp) . " bytes: " . tuyaHex($resp));
+                // STATUS format (no retcode) is the common response to CMD_QUERY
+                $plain = tuyaDecodeStatus33($resp, $key);
+                if ($plain === null || trim($plain) === '') {
+                    $r = tuyaDecodeResponse33($resp, $key);
+                    if ($r !== null) $plain = $r[0];
+                }
+            }
+        }
+
+        fclose($sock);
+
+        if ($plain === null || trim($plain) === '') {
+            tuyaLog("queryDevice: '{$deviceName}' — could not decode any response");
+            echo json_encode(['error' => 'Could not decode response — wrong key, or device did not respond']);
             exit;
         }
 
@@ -477,11 +507,12 @@ switch ($command) {
                  . ',"t":'     . json_encode($ts)
                  . ',"dps":'   . json_encode($dps, JSON_UNESCAPED_SLASHES) . '}';
 
-        tuyaDebug("--- tuya/{$deviceName}/sendDps  key={$dpsKey}  val={$dpsValue}  id={$id}  ip={$ip} ---");
-        tuyaDebug("tuya/{$deviceName}/send-json  {$payload}");
+        tuyaLog("sendDps: '{$deviceName}' ip={$ip} dps={$dpsKey} val={$dpsValue}");
+        tuyaLog("sendDps: payload  {$payload}");
 
         $pkt = tuyaBuildPacket33($key, $payload, 0x07);
         if ($pkt === false) {
+            tuyaLog("sendDps: AES encryption failed: " . openssl_error_string());
             echo json_encode(['error' => 'AES encryption failed: ' . openssl_error_string()]);
             exit;
         }
@@ -504,10 +535,9 @@ switch ($command) {
         $plain   = $result ? $result[0] : null;
         $retcode = $result ? $result[1] : (strlen($resp) >= 20 ? unpack('N', substr($resp, 16, 4))[1] : 0xFFFFFFFF);
 
-        tuyaLog("sendDps: '{$deviceName}' dps={$dpsKey} val={$dpsValue} retcode=0x" . sprintf('%08X', $retcode));
-        tuyaDebug("tuya/{$deviceName}/send-retcode  0x" . sprintf('%08X', $retcode) . " (" . ($retcode === 0 ? 'OK' : 'ERROR') . ")");
+        tuyaLog("sendDps: '{$deviceName}' retcode=0x" . sprintf('%08X', $retcode) . " (" . ($retcode === 0 ? 'OK' : 'ERROR') . ")");
         if ($plain !== null && $plain !== '')
-            tuyaDebug("tuya/{$deviceName}/send-response  {$plain}");
+            tuyaLog("sendDps: '{$deviceName}' response: {$plain}");
 
         header('Content-Type: application/json');
         if ($retcode === 0) {

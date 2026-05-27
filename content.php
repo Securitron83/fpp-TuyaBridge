@@ -309,6 +309,7 @@ function queryDpsDevice() {
     const savedDps = dev.dps || [];
 
     $.post(PLUGIN_API + '&command=queryDevice', { name: name }, function(r) {
+        refreshLog();
         if (r.error) {
             $('#dpsQueryStatus').html('<span class="text-danger">' + escapeHtml(r.error) + '</span>');
             return;
@@ -411,9 +412,11 @@ function sendDpsCommand() {
             $('#sendDpsStatus').html('<span class="text-danger">Error (retcode 0x' +
                 (r.retcode >>> 0).toString(16).toUpperCase().padStart(8,'0') + detail + ')</span>');
         }
+        refreshLog();
     }, 'json').fail(function(xhr) {
         $('#sendDpsStatus').html('<span class="text-danger">Request failed.</span>');
         console.error('sendDps error:', xhr.status, xhr.responseText);
+        refreshLog();
     });
 }
 

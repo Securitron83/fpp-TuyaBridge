@@ -44,8 +44,10 @@ function tuyaHex($bin) {
 // $key: 16-byte local key string
 // $payload: plaintext JSON string
 // $cmd: command byte (0x07 = SET, 0x0A = QUERY)
+// $ver33: include the 15-byte "3.3" version header (required for SET/0x07,
+//         must be omitted for QUERY/0x0A per tinytuya behaviour)
 // Returns raw binary string or false on AES error.
-function tuyaBuildPacket33($key, $payload, $cmd, $seq = 1) {
+function tuyaBuildPacket33($key, $payload, $cmd, $seq = 1, $ver33 = true) {
     // Manual PKCS7 padding to 16-byte boundary
     $padLen = 16 - (strlen($payload) % 16);
     $padded = $payload . str_repeat(chr($padLen), $padLen);
@@ -54,15 +56,14 @@ function tuyaBuildPacket33($key, $payload, $cmd, $seq = 1) {
                                   OPENSSL_RAW_DATA | OPENSSL_ZERO_PADDING);
     if ($encrypted === false) return false;
 
-    // Version header: "3.3" + 12 null bytes = 15 bytes
-    $ver33  = "3.3" . str_repeat("\x00", 12);
-    $length = 15 + strlen($encrypted) + 8; // ver33 + data + CRC(4) + SUFFIX(4)
+    $header = $ver33 ? ("3.3" . str_repeat("\x00", 12)) : '';
+    $length = strlen($header) + strlen($encrypted) + 8; // header + data + CRC(4) + SUFFIX(4)
 
     $pkt  = "\x00\x00\x55\xaa";
     $pkt .= pack('N', $seq);
     $pkt .= pack('N', $cmd);
     $pkt .= pack('N', $length);
-    $pkt .= $ver33;
+    $pkt .= $header;
     $pkt .= $encrypted;
     $pkt .= hex2bin(hash('crc32b', $pkt));  // CRC over everything so far
     $pkt .= "\x00\x00\xaa\x55";
@@ -363,8 +364,10 @@ switch ($command) {
         // Step 2: if no greeting or decoding failed, send CMD_QUERY (0x0A).
         if ($plain === null || trim($plain) === '') {
             $ts      = (string)time();
-            $qpayload = '{"devId":' . json_encode($id) . ',"uid":' . json_encode($id) . ',"t":' . json_encode($ts) . '}';
-            $pkt = tuyaBuildPacket33($key, $qpayload, 0x0A);
+            // CMD_QUERY payload includes gwId; NO version header (tinytuya omits
+            // VER33 for DP_QUERY — including it causes "parse data error")
+            $qpayload = '{"gwId":' . json_encode($id) . ',"devId":' . json_encode($id) . ',"uid":' . json_encode($id) . ',"t":' . json_encode($ts) . '}';
+            $pkt = tuyaBuildPacket33($key, $qpayload, 0x0A, 1, false);
             if ($pkt !== false) {
                 tuyaDebug("tuya/{$deviceName}/query-tx  " . strlen($pkt) . " bytes: " . tuyaHex($pkt));
                 fwrite($sock, $pkt);

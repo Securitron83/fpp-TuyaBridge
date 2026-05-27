@@ -32,6 +32,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -212,8 +213,14 @@ public:
         if (a.size() < 3)
             return std::make_unique<ErrorResult>("Usage: device dps_key value");
 
+        // Key may be "1 (Power)" when selected from the dropdown — strip the suffix
+        std::string dpsKey = a[1];
+        auto spPos = dpsKey.find(' ');
+        if (spPos != std::string::npos)
+            dpsKey = dpsKey.substr(0, spPos);
+
         TuyaLog::debug("SendDPS    device='%s'  key='%s'  value='%s'",
-                       a[0].c_str(), a[1].c_str(), a[2].c_str());
+                       a[0].c_str(), dpsKey.c_str(), a[2].c_str());
 
         TuyaDevice* dev = m_plugin->findDevice(a[0]);
         if (!dev) {
@@ -225,18 +232,18 @@ public:
         Json::Value dps;
 
         // Parse value: true/false → bool, integer string → int, else string
-        if (valStr == "true" || valStr == "on")       dps[a[1]] = true;
-        else if (valStr == "false" || valStr == "off") dps[a[1]] = false;
+        if (valStr == "true" || valStr == "on")       dps[dpsKey] = true;
+        else if (valStr == "false" || valStr == "off") dps[dpsKey] = false;
         else {
             try {
                 size_t pos = 0;
                 int iv = std::stoi(valStr, &pos);
                 if (pos == valStr.size())
-                    dps[a[1]] = iv;
+                    dps[dpsKey] = iv;
                 else
-                    dps[a[1]] = valStr;
+                    dps[dpsKey] = valStr;
             } catch (...) {
-                dps[a[1]] = valStr;
+                dps[dpsKey] = valStr;
             }
         }
 
@@ -359,6 +366,25 @@ void TuyaBridgePlugin::registerCommands() {
         dim->args.front().setContentList(names);
         col->args.front().setContentList(names);
         dps->args.front().setContentList(names);
+    }
+
+    // Populate the DPS Key dropdown with named definitions from all devices.
+    // Format: "ID (Name)" when a friendly name exists, else just "ID".
+    // IDs are deduplicated — first device that defines an ID wins.
+    {
+        std::set<std::string> seen;
+        std::vector<std::string> dpsKeys;
+        for (const auto& d : m_devices) {
+            for (const auto& def : d->getDpsDefs()) {
+                if (seen.insert(def.id).second) {
+                    dpsKeys.push_back(def.name.empty()
+                        ? def.id
+                        : (def.id + " (" + def.name + ")"));
+                }
+            }
+        }
+        if (!dpsKeys.empty())
+            dps->args[1].setContentList(dpsKeys);
     }
 
     CommandManager::INSTANCE.addCommand(sw);

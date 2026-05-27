@@ -15,6 +15,7 @@
 #include <ctime>
 #include <mutex>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace TuyaLog {
@@ -34,6 +35,8 @@ inline void write(const char* level, const char* fmt, va_list ap) {
     std::lock_guard<std::mutex> lk(mtx());
     FILE* f = fopen(path.c_str(), "a");
     if (!f) return;
+    // Ensure any process (fppd, www-data, fpp) can append to this file.
+    chmod(path.c_str(), 0666);
 
     time_t now = time(nullptr);
     char   ts[20];

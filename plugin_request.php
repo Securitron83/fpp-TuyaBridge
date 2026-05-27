@@ -126,6 +126,28 @@ function tuyaDecodeStatus33($resp, $key) {
     return tuyaAesDecrypt(substr($resp, $dataStart, $dataLen), $key);
 }
 
+// Detect packet format by inspecting bytes 16-18 and call the right decoder.
+//
+// STATUS packets (device-initiated): byte 16-18 == "3.3" (start of VER33 header,
+//   no retcode field).  dataStart=16, dataLen=LEN-8.
+//
+// RESPONSE packets (reply to a command we sent): byte 16-18 is the high bytes of
+//   a retcode (always a small integer like 0x00000000 or 0x00000001, never "3.3").
+//   dataStart=20, dataLen=LEN-12.
+//
+// Returns plaintext string or null.
+function tuyaPickDecoder($resp, $key) {
+    if (strlen($resp) < 24) return null;
+    if (substr($resp, 0, 4) !== "\x00\x00\x55\xaa") return null;
+    // If bytes 16-18 are "3.3" this is a STATUS packet (no retcode field)
+    if (substr($resp, 16, 3) === '3.3') {
+        return tuyaDecodeStatus33($resp, $key);
+    }
+    // Otherwise it is a RESPONSE packet (retcode at bytes 16-19)
+    $r = tuyaDecodeResponse33($resp, $key);
+    return $r ? $r[0] : null;
+}
+
 // Open a TCP connection to a Tuya device, drain the greeting packet, and
 // return the socket resource.  Returns null on failure.
 // The returned socket has a 3-second read/write timeout set.
@@ -335,16 +357,10 @@ switch ($command) {
         $greeting = @fread($sock, 4096);
         if (strlen($greeting) >= 24) {
             tuyaDebug("tuya/{$deviceName}/query-greeting  " . strlen($greeting) . " bytes: " . tuyaHex($greeting));
-            $plain = tuyaDecodeStatus33($greeting, $key);
-            if ($plain === null || trim($plain) === '') {
-                $r = tuyaDecodeResponse33($greeting, $key);
-                if ($r !== null) $plain = $r[0];
-            }
+            $plain = tuyaPickDecoder($greeting, $key);
         }
 
         // Step 2: if no greeting or decoding failed, send CMD_QUERY (0x0A).
-        // The device responds in STATUS format (no retcode field) — we try
-        // that first, then fall back to the response format (with retcode).
         if ($plain === null || trim($plain) === '') {
             $ts      = (string)time();
             $qpayload = '{"devId":' . json_encode($id) . ',"uid":' . json_encode($id) . ',"t":' . json_encode($ts) . '}';
@@ -354,14 +370,9 @@ switch ($command) {
                 fwrite($sock, $pkt);
                 stream_set_timeout($sock, 2);
                 $resp = @fread($sock, 4096);
-                tuyaLog("queryDevice: '{$deviceName}' ({$ip}) — CMD_QUERY got " . strlen($resp) . " B");
+                tuyaLog("queryDevice: '{$deviceName}' ({$ip}) — CMD_QUERY rx " . strlen($resp) . " B");
                 tuyaDebug("tuya/{$deviceName}/query-rx  " . strlen($resp) . " bytes: " . tuyaHex($resp));
-                // STATUS format (no retcode) is the common response to CMD_QUERY
-                $plain = tuyaDecodeStatus33($resp, $key);
-                if ($plain === null || trim($plain) === '') {
-                    $r = tuyaDecodeResponse33($resp, $key);
-                    if ($r !== null) $plain = $r[0];
-                }
+                $plain = tuyaPickDecoder($resp, $key);
             }
         }
 

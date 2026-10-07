@@ -193,7 +193,7 @@ if (file_exists($devicesFile)) {
 <script>
 let devices = <?php echo htmlspecialchars_decode($currentDevices, ENT_NOQUOTES); ?>;
 
-const VERSIONS = ['3.3', '3.1'];
+const VERSIONS = ['3.3', '3.4', '3.5', '3.1'];
 const TYPES    = ['switch', 'dimmer', 'rgblight', 'generic'];
 
 function escapeHtml(s) {

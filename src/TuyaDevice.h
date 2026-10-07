@@ -11,6 +11,8 @@
 #include <json/json.h>
 #endif
 
+#include "TuyaProtocol.h"
+
 class TuyaDevice {
 public:
     enum class Type {
@@ -76,11 +78,22 @@ private:
 
     int      m_sock     = -1;
     uint32_t m_sequence = 0;
+    std::string m_sessionKey;           // v3.4/3.5: negotiated per connection
+    std::vector<uint8_t> m_rxBuf;       // v3.4/3.5: partial frames between reads
     mutable std::mutex m_mutex;
     std::vector<DpsDef> m_dpsDefs;
 
+    bool usesSession() const { return m_version == "3.4" || m_version == "3.5"; }
+
     bool ensureConnected();
+    void closeSocket();
+    bool negotiateSession();
+    bool readFrame(const std::string& key, int timeoutMs, Tuya::Frame& out);
+    std::vector<uint8_t> buildSessionPacket(const std::string& key,
+                                            const std::string& plaintext,
+                                            uint32_t command);
     bool sendJson(const Json::Value& payload);
+    bool sendJsonSession(const std::string& dpsStr);
     bool sendPacket(const std::vector<uint8_t>& packet);
 
     static std::string rgbToTuyaColor(uint8_t r, uint8_t g, uint8_t b);

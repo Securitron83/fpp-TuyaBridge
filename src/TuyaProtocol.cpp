@@ -8,7 +8,10 @@
 
 #include <openssl/bio.h>
 #include <openssl/buffer.h>
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/rand.h>
 #include <zlib.h>
 
 namespace Tuya {
@@ -217,6 +220,235 @@ std::string decodeResponse(const std::vector<uint8_t>& pkt,
         // v3.1 responses are plain JSON (not encrypted)
         return std::string(pkt.begin() + dataStart, pkt.begin() + dataStart + dataLen);
     }
+}
+
+// ---------------------------------------------------------------------------
+// v3.4 / v3.5
+// ---------------------------------------------------------------------------
+
+static const uint8_t PREFIX35[4] = {0x00, 0x00, 0x66, 0x99};
+static const uint8_t SUFFIX35[4] = {0x00, 0x00, 0x99, 0x66};
+
+// AES-128-GCM encrypt; returns ciphertext followed by the 16-byte tag.
+static bool aesGcmEncrypt(const std::string& key, const uint8_t* iv,
+                          const uint8_t* aad, size_t aadLen,
+                          const std::string& plaintext, std::vector<uint8_t>& out) {
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    int len = 0;
+    bool ok = EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, nullptr, nullptr) == 1 &&
+              EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) == 1 &&
+              EVP_EncryptInit_ex(ctx, nullptr, nullptr,
+                                 reinterpret_cast<const uint8_t*>(key.data()), iv) == 1;
+    if (ok && aadLen > 0)
+        ok = EVP_EncryptUpdate(ctx, nullptr, &len, aad, static_cast<int>(aadLen)) == 1;
+    out.assign(plaintext.size() + 16, 0);
+    int ctLen = 0;
+    if (ok && !plaintext.empty()) {
+        ok = EVP_EncryptUpdate(ctx, out.data(), &len,
+                               reinterpret_cast<const uint8_t*>(plaintext.data()),
+                               static_cast<int>(plaintext.size())) == 1;
+        ctLen = len;
+    }
+    if (ok) {
+        ok = EVP_EncryptFinal_ex(ctx, out.data() + ctLen, &len) == 1;
+        ctLen += len;
+    }
+    if (ok)
+        ok = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, out.data() + ctLen) == 1;
+    EVP_CIPHER_CTX_free(ctx);
+    out.resize(ctLen + 16);
+    return ok;
+}
+
+// AES-128-GCM decrypt and verify the tag. Returns false on authentication failure.
+static bool aesGcmDecrypt(const std::string& key, const uint8_t* iv,
+                          const uint8_t* aad, size_t aadLen,
+                          const uint8_t* ct, size_t ctLen, const uint8_t* tag,
+                          std::string& out) {
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    int len = 0;
+    std::vector<uint8_t> pt(ctLen + 16);
+    bool ok = EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, nullptr, nullptr) == 1 &&
+              EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) == 1 &&
+              EVP_DecryptInit_ex(ctx, nullptr, nullptr,
+                                 reinterpret_cast<const uint8_t*>(key.data()), iv) == 1;
+    if (ok && aadLen > 0)
+        ok = EVP_DecryptUpdate(ctx, nullptr, &len, aad, static_cast<int>(aadLen)) == 1;
+    int ptLen = 0;
+    if (ok && ctLen > 0) {
+        ok = EVP_DecryptUpdate(ctx, pt.data(), &len, ct, static_cast<int>(ctLen)) == 1;
+        ptLen = len;
+    }
+    if (ok)
+        ok = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, const_cast<uint8_t*>(tag)) == 1;
+    if (ok) {
+        ok = EVP_DecryptFinal_ex(ctx, pt.data() + ptLen, &len) == 1;
+        ptLen += len;
+    }
+    EVP_CIPHER_CTX_free(ctx);
+    if (ok)
+        out.assign(reinterpret_cast<const char*>(pt.data()), ptLen);
+    return ok;
+}
+
+std::string versionHeader(const std::string& version) {
+    return version.substr(0, 3) + std::string(12, '\0');
+}
+
+std::string randomNonce16() {
+    uint8_t buf[16];
+    RAND_bytes(buf, sizeof(buf));
+    return std::string(reinterpret_cast<const char*>(buf), sizeof(buf));
+}
+
+std::string hmacSha256(const std::string& key, const std::string& data) {
+    uint8_t mac[32];
+    unsigned int macLen = sizeof(mac);
+    HMAC(EVP_sha256(), key.data(), static_cast<int>(key.size()),
+         reinterpret_cast<const uint8_t*>(data.data()), data.size(), mac, &macLen);
+    return std::string(reinterpret_cast<const char*>(mac), macLen);
+}
+
+std::string deriveSessionKey(const std::string& version,
+                             const std::string& localKey,
+                             const std::string& localNonce,
+                             const std::string& remoteNonce) {
+    std::string mixed(16, '\0');
+    for (size_t i = 0; i < 16; ++i)
+        mixed[i] = static_cast<char>(localNonce[i] ^ remoteNonce[i]);
+
+    if (version == "3.5") {
+        std::vector<uint8_t> ct;
+        if (!aesGcmEncrypt(localKey, reinterpret_cast<const uint8_t*>(localNonce.data()),
+                           nullptr, 0, mixed, ct))
+            return "";
+        return std::string(ct.begin(), ct.begin() + 16);  // ciphertext only, tag dropped
+    }
+
+    // v3.4: AES-ECB without padding (input is exactly one block)
+    auto ct = aesEcbEncrypt(localKey, mixed);
+    return std::string(ct.begin(), ct.begin() + 16);
+}
+
+std::vector<uint8_t> buildPacket34(const std::string& key,
+                                   const std::string& plaintext,
+                                   uint32_t           sequence,
+                                   uint32_t           command) {
+    auto encrypted = aesEcbEncrypt(key, plaintext);
+
+    // length field = encrypted + HMAC(32) + suffix(4)
+    std::vector<uint8_t> pkt;
+    pkt.insert(pkt.end(), PREFIX, PREFIX + 4);
+    pushU32BE(pkt, sequence);
+    pushU32BE(pkt, command);
+    pushU32BE(pkt, static_cast<uint32_t>(encrypted.size()) + 36);
+    pkt.insert(pkt.end(), encrypted.begin(), encrypted.end());
+
+    std::string mac = hmacSha256(key, std::string(pkt.begin(), pkt.end()));
+    pkt.insert(pkt.end(), mac.begin(), mac.end());
+    pkt.insert(pkt.end(), SUFFIX, SUFFIX + 4);
+    return pkt;
+}
+
+std::vector<uint8_t> buildPacket35(const std::string& key,
+                                   const std::string& plaintext,
+                                   uint32_t           sequence,
+                                   uint32_t           command) {
+    uint8_t iv[12];
+    RAND_bytes(iv, sizeof(iv));
+
+    // Header: PREFIX(4) + reserved(2) + SEQ(4) + CMD(4) + LEN(4).
+    // LEN = IV(12) + ciphertext + tag(16); the suffix is not counted.
+    std::vector<uint8_t> pkt;
+    pkt.insert(pkt.end(), PREFIX35, PREFIX35 + 4);
+    pkt.push_back(0);
+    pkt.push_back(0);
+    pushU32BE(pkt, sequence);
+    pushU32BE(pkt, command);
+    pushU32BE(pkt, static_cast<uint32_t>(12 + plaintext.size() + 16));
+
+    // AAD is the header after the prefix (14 bytes)
+    std::vector<uint8_t> ct;
+    if (!aesGcmEncrypt(key, iv, pkt.data() + 4, 14, plaintext, ct))
+        return {};
+
+    pkt.insert(pkt.end(), iv, iv + 12);
+    pkt.insert(pkt.end(), ct.begin(), ct.end());
+    pkt.insert(pkt.end(), SUFFIX35, SUFFIX35 + 4);
+    return pkt;
+}
+
+// Skip to the first occurrence of prefix in buf; returns its offset or -1.
+static long findPrefix(const std::vector<uint8_t>& buf, const uint8_t* prefix) {
+    for (size_t i = 0; i + 4 <= buf.size(); ++i)
+        if (memcmp(buf.data() + i, prefix, 4) == 0)
+            return static_cast<long>(i);
+    return -1;
+}
+
+long decodeFrame34(const std::vector<uint8_t>& buf, const std::string& key, Frame& out) {
+    long start = findPrefix(buf, PREFIX);
+    if (start < 0) return 0;
+    if (buf.size() < static_cast<size_t>(start) + 16) return 0;
+
+    const uint8_t* p = buf.data() + start;
+    uint32_t length = readU32BE(p + 12);
+    if (length < 36 || length > 0x10000) return -1;
+    if (buf.size() < static_cast<size_t>(start) + 16 + length) return 0;
+
+    size_t total   = 16 + length;
+    size_t bodyLen = length - 36;  // between header and HMAC
+
+    std::string mac = hmacSha256(key, std::string(p, p + 16 + bodyLen));
+    if (CRYPTO_memcmp(mac.data(), p + 16 + bodyLen, 32) != 0) return -1;
+
+    out = Frame();
+    out.sequence = readU32BE(p + 4);
+    out.command  = readU32BE(p + 8);
+
+    const uint8_t* body = p + 16;
+    // Encrypted data is a multiple of 16 bytes, so a 4-byte remainder is the retcode.
+    if (bodyLen % 16 == 4) {
+        out.hasRetcode = true;
+        out.retcode    = readU32BE(body);
+        body    += 4;
+        bodyLen -= 4;
+    }
+    if (bodyLen > 0)
+        out.payload = aesEcbDecrypt(key, body, bodyLen);
+    return start + static_cast<long>(total);
+}
+
+long decodeFrame35(const std::vector<uint8_t>& buf, const std::string& key, Frame& out) {
+    long start = findPrefix(buf, PREFIX35);
+    if (start < 0) return 0;
+    if (buf.size() < static_cast<size_t>(start) + 18) return 0;
+
+    const uint8_t* p = buf.data() + start;
+    uint32_t length = readU32BE(p + 14);
+    if (length < 28 || length > 0x10000) return -1;
+    if (buf.size() < static_cast<size_t>(start) + 18 + length + 4) return 0;
+
+    const uint8_t* iv  = p + 18;
+    const uint8_t* ct  = iv + 12;
+    size_t         ctLen = length - 28;
+    const uint8_t* tag = ct + ctLen;
+
+    std::string pt;
+    if (!aesGcmDecrypt(key, iv, p + 4, 14, ct, ctLen, tag, pt)) return -1;
+
+    out = Frame();
+    out.sequence = readU32BE(p + 6);
+    out.command  = readU32BE(p + 10);
+    // Device replies start with a 4-byte retcode; it is always a small value,
+    // whereas JSON, version headers and nonces never start with three zero bytes.
+    if (pt.size() >= 4 && pt[0] == 0 && pt[1] == 0 && pt[2] == 0) {
+        out.hasRetcode = true;
+        out.retcode    = static_cast<uint8_t>(pt[3]);
+        pt.erase(0, 4);
+    }
+    out.payload = pt;
+    return start + static_cast<long>(18 + length + 4);
 }
 
 } // namespace Tuya

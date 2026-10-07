@@ -149,6 +149,150 @@ function tuyaPickDecoder($resp, $key) {
     return $r ? $r[0] : null;
 }
 
+// ---------------------------------------------------------------------------
+// Tuya v3.4 / v3.5 protocol helpers
+//
+// Both versions negotiate a per-connection session key before any other
+// traffic.  v3.4 uses 0x55AA frames with AES-128-ECB + HMAC-SHA256; v3.5 uses
+// 0x6699 frames with AES-128-GCM.  Mirrors src/TuyaProtocol.cpp.
+// ---------------------------------------------------------------------------
+
+function tuyaUsesSession($version) {
+    return $version === '3.4' || $version === '3.5';
+}
+
+function tuyaBuildSessionPacket($version, $key, $plaintext, $cmd, $seq) {
+    if ($version === '3.5') {
+        $iv     = random_bytes(12);
+        $header = "\x00\x00\x66\x99" . "\x00\x00" . pack('N', $seq) . pack('N', $cmd)
+                . pack('N', 12 + strlen($plaintext) + 16);
+        $tag    = '';
+        $ct     = openssl_encrypt($plaintext, 'aes-128-gcm', $key, OPENSSL_RAW_DATA,
+                                  $iv, $tag, substr($header, 4), 16);
+        if ($ct === false) return false;
+        return $header . $iv . $ct . $tag . "\x00\x00\x99\x66";
+    }
+    $padLen = 16 - (strlen($plaintext) % 16);
+    $enc    = openssl_encrypt($plaintext . str_repeat(chr($padLen), $padLen), 'AES-128-ECB', $key,
+                              OPENSSL_RAW_DATA | OPENSSL_ZERO_PADDING);
+    if ($enc === false) return false;
+    $pkt = "\x00\x00\x55\xaa" . pack('N', $seq) . pack('N', $cmd) . pack('N', strlen($enc) + 36) . $enc;
+    return $pkt . hash_hmac('sha256', $pkt, $key, true) . "\x00\x00\xaa\x55";
+}
+
+// Decode one frame from the front of $buf.  Returns [frame, bytesConsumed],
+// [null, 0] when more data is needed, or false on a malformed/unauthenticated frame.
+// frame = ['cmd' => int, 'retcode' => int|null, 'payload' => string]
+function tuyaDecodeSessionFrame($version, $key, $buf) {
+    if ($version === '3.5') {
+        $start = strpos($buf, "\x00\x00\x66\x99");
+        if ($start === false || strlen($buf) < $start + 18) return [null, 0];
+        $len = unpack('N', substr($buf, $start + 14, 4))[1];
+        if ($len < 28) return false;
+        if (strlen($buf) < $start + 18 + $len + 4) return [null, 0];
+        $aad = substr($buf, $start + 4, 14);
+        $iv  = substr($buf, $start + 18, 12);
+        $ct  = substr($buf, $start + 30, $len - 28);
+        $tag = substr($buf, $start + 18 + $len - 16, 16);
+        $pt  = openssl_decrypt($ct, 'aes-128-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag, $aad);
+        if ($pt === false) return false;
+        $retcode = null;
+        if (strlen($pt) >= 4 && substr($pt, 0, 3) === "\x00\x00\x00") {
+            $retcode = ord($pt[3]);
+            $pt = substr($pt, 4);
+        }
+        return [['cmd' => unpack('N', substr($buf, $start + 10, 4))[1],
+                 'retcode' => $retcode, 'payload' => $pt], $start + 18 + $len + 4];
+    }
+
+    $start = strpos($buf, "\x00\x00\x55\xaa");
+    if ($start === false || strlen($buf) < $start + 16) return [null, 0];
+    $len = unpack('N', substr($buf, $start + 12, 4))[1];
+    if ($len < 36) return false;
+    if (strlen($buf) < $start + 16 + $len) return [null, 0];
+    $bodyLen = $len - 36;
+    $signed  = substr($buf, $start, 16 + $bodyLen);
+    $mac     = substr($buf, $start + 16 + $bodyLen, 32);
+    if (!hash_equals(hash_hmac('sha256', $signed, $key, true), $mac)) return false;
+    $body    = substr($buf, $start + 16, $bodyLen);
+    $retcode = null;
+    if ($bodyLen % 16 === 4) {
+        $retcode = unpack('N', substr($body, 0, 4))[1];
+        $body    = substr($body, 4);
+    }
+    $plain = $body === '' ? '' : openssl_decrypt($body, 'AES-128-ECB', $key,
+                                                 OPENSSL_RAW_DATA | OPENSSL_ZERO_PADDING);
+    if ($plain === false) return false;
+    $pad = $plain === '' ? 0 : ord(substr($plain, -1));
+    if ($pad >= 1 && $pad <= 16) $plain = substr($plain, 0, -$pad);
+    return [['cmd' => unpack('N', substr($buf, $start + 8, 4))[1],
+             'retcode' => $retcode, 'payload' => $plain], $start + 16 + $len];
+}
+
+// Read frames from $sock until one decodes or the read times out.
+function tuyaReadSessionFrame($sock, $version, $key, &$buf) {
+    for ($i = 0; $i < 20; $i++) {
+        $r = tuyaDecodeSessionFrame($version, $key, $buf);
+        if ($r === false) return false;
+        if ($r[0] !== null) {
+            $buf = substr($buf, $r[1]);
+            return $r[0];
+        }
+        $chunk = @fread($sock, 4096);
+        if ($chunk === false || $chunk === '') return false;
+        $buf .= $chunk;
+    }
+    return false;
+}
+
+// Connect and negotiate a session key.  Returns ['sock', 'key', 'seq', 'buf'] or a string error.
+function tuyaOpenSession($ip, $version, $localKey) {
+    $sock = @fsockopen($ip, 6668, $errno, $errstr, 3);
+    if (!$sock) return "Cannot connect to {$ip}:6668 — is the device online?";
+    stream_set_timeout($sock, 3);
+
+    $localNonce = random_bytes(16);
+    $seq = 1;
+    $buf = '';
+    fwrite($sock, tuyaBuildSessionPacket($version, $localKey, $localNonce, 0x03, $seq++));
+    $resp = tuyaReadSessionFrame($sock, $version, $localKey, $buf);
+    if (!$resp || $resp['cmd'] !== 0x04) {
+        fclose($sock);
+        return "No v{$version} session response — wrong key or version?";
+    }
+    $body = $resp['payload'];
+    if (strlen($body) === 52) $body = substr($body, 4);
+    if (strlen($body) < 48 ||
+        !hash_equals(hash_hmac('sha256', $localNonce, $localKey, true), substr($body, 16, 32))) {
+        fclose($sock);
+        return 'Session response failed verification — wrong key?';
+    }
+    $remoteNonce = substr($body, 0, 16);
+    fwrite($sock, tuyaBuildSessionPacket($version, $localKey,
+           hash_hmac('sha256', $remoteNonce, $localKey, true), 0x05, $seq++));
+
+    $mixed = $localNonce ^ $remoteNonce;
+    if ($version === '3.5') {
+        $tag = '';
+        $sessionKey = openssl_encrypt($mixed, 'aes-128-gcm', $localKey, OPENSSL_RAW_DATA,
+                                      substr($localNonce, 0, 12), $tag, '', 16);
+    } else {
+        $sessionKey = openssl_encrypt($mixed, 'AES-128-ECB', $localKey,
+                                      OPENSSL_RAW_DATA | OPENSSL_ZERO_PADDING);
+    }
+    if ($sessionKey === false || strlen($sessionKey) !== 16) {
+        fclose($sock);
+        return 'Session key derivation failed';
+    }
+    return ['sock' => $sock, 'key' => $sessionKey, 'seq' => $seq, 'buf' => $buf];
+}
+
+// Strip the "3.4"/"3.5" + 12-null version header if present.
+function tuyaStripVersionHeader($payload, $version) {
+    if (strlen($payload) >= 15 && substr($payload, 0, 3) === $version) return substr($payload, 15);
+    return $payload;
+}
+
 // Open a TCP connection to a Tuya device, drain the greeting packet, and
 // return the socket resource.  Returns null on failure.
 // The returned socket has a 3-second read/write timeout set.
@@ -336,9 +480,40 @@ switch ($command) {
             exit;
         }
 
+        if (tuyaUsesSession($version)) {
+            $s = tuyaOpenSession($ip, $version, $key);
+            if (is_string($s)) {
+                tuyaLog("queryDevice: '{$deviceName}' ({$ip}) v{$version}: {$s}");
+                echo json_encode(['error' => $s]);
+                exit;
+            }
+            // DP_QUERY_NEW (0x10) with an empty payload; queries carry no version header
+            fwrite($s['sock'], tuyaBuildSessionPacket($version, $s['key'], '{}', 0x10, $s['seq']++));
+            $plain = null;
+            for ($i = 0; $i < 3 && $plain === null; $i++) {
+                $f = tuyaReadSessionFrame($s['sock'], $version, $s['key'], $s['buf']);
+                if (!$f) break;
+                $p = tuyaStripVersionHeader($f['payload'], $version);
+                if (strpos($p, '"dps"') !== false) $plain = $p;
+            }
+            fclose($s['sock']);
+            if ($plain === null) {
+                tuyaLog("queryDevice: '{$deviceName}' v{$version} — no status reply");
+                echo json_encode(['error' => 'Device did not return its status']);
+                exit;
+            }
+            tuyaDebug("tuya/{$deviceName}/query-json  {$plain}");
+            $decoded = json_decode($plain, true);
+            $dps = $decoded['dps'] ?? ($decoded['data']['dps'] ?? []);
+            tuyaLog("queryDevice: '{$deviceName}' returned " . count($dps) . " DPS value(s)");
+            header('Content-Type: application/json');
+            echo json_encode(['status' => 'ok', 'dps' => $dps]);
+            exit;
+        }
+
         if ($version !== '3.3') {
             http_response_code(400);
-            echo json_encode(['error' => 'queryDevice only supports v3.3 devices']);
+            echo json_encode(['error' => "queryDevice does not support v{$version} devices"]);
             exit;
         }
 
@@ -501,9 +676,9 @@ switch ($command) {
             exit;
         }
 
-        if ($version !== '3.3') {
+        if ($version !== '3.3' && !tuyaUsesSession($version)) {
             http_response_code(400);
-            echo json_encode(['error' => 'sendDps only supports v3.3 devices from the UI']);
+            echo json_encode(['error' => "sendDps does not support v{$version} devices from the UI"]);
             exit;
         }
 
@@ -514,6 +689,31 @@ switch ($command) {
         else                                                   $jsonVal = $dpsValue;
 
         $dps = [$dpsKey => $jsonVal];
+
+        if (tuyaUsesSession($version)) {
+            tuyaLog("sendDps: '{$deviceName}' ip={$ip} v{$version} dps={$dpsKey} val={$dpsValue}");
+            $s = tuyaOpenSession($ip, $version, $key);
+            if (is_string($s)) {
+                tuyaLog("sendDps: '{$deviceName}': {$s}");
+                echo json_encode(['error' => $s]);
+                exit;
+            }
+            $payload = '{"protocol":5,"t":' . time() . ',"data":{"dps":'
+                     . json_encode($dps, JSON_UNESCAPED_SLASHES) . '}}';
+            fwrite($s['sock'], tuyaBuildSessionPacket($version, $s['key'],
+                   $version . str_repeat("\x00", 12) . $payload, 0x0D, $s['seq']++));
+            $f = tuyaReadSessionFrame($s['sock'], $version, $s['key'], $s['buf']);
+            fclose($s['sock']);
+            $retcode = $f ? ($f['retcode'] ?? 0) : 0xFFFFFFFF;
+            $plain   = $f ? tuyaStripVersionHeader($f['payload'], $version) : '';
+            tuyaLog("sendDps: '{$deviceName}' retcode=0x" . sprintf('%08X', $retcode)
+                    . ($plain !== '' ? " response: {$plain}" : ''));
+            header('Content-Type: application/json');
+            echo json_encode($retcode === 0
+                ? ['status' => 'ok']
+                : ['status' => 'error', 'retcode' => $retcode, 'detail' => $plain ?: 'no response']);
+            exit;
+        }
 
         $ts      = (string)time();
         $payload = '{"devId":' . json_encode($id)

@@ -83,12 +83,16 @@ private:
     mutable std::mutex m_mutex;
     std::vector<DpsDef> m_dpsDefs;
 
+    enum class Verify { CONFIRMED, MISMATCH, UNVERIFIABLE };
+
     bool usesSession() const { return m_version == "3.4" || m_version == "3.5"; }
 
-    bool ensureConnected();
+    bool execute(const Json::Value& dps, const char* what);
+    Verify verifyState(const Json::Value& dps);
     void closeSocket();
     bool negotiateSession();
     bool readFrame(const std::string& key, int timeoutMs, Tuya::Frame& out);
+    bool readFrame33(int timeoutMs, Tuya::Frame& out);
     std::vector<uint8_t> buildSessionPacket(const std::string& key,
                                             const std::string& plaintext,
                                             uint32_t command);

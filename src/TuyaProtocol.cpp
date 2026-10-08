@@ -128,11 +128,13 @@ static std::string md5Hex(const std::string& data) {
 std::vector<uint8_t> buildPacket33(const std::string& localKey,
                                     const std::string& jsonPayload,
                                     uint32_t sequence,
-                                    uint32_t command) {
+                                    uint32_t command,
+                                    bool withVersionHeader) {
     auto encrypted = aesEcbEncrypt(localKey, jsonPayload);
+    uint32_t headerLen = withVersionHeader ? 15 : 0;
 
-    // length field = version_header(15) + encrypted + CRC(4) + suffix(4)
-    uint32_t length = 15 + static_cast<uint32_t>(encrypted.size()) + 8;
+    // length field = version_header(15, optional) + encrypted + CRC(4) + suffix(4)
+    uint32_t length = headerLen + static_cast<uint32_t>(encrypted.size()) + 8;
 
     std::vector<uint8_t> pkt;
     pkt.reserve(4 + 12 + length);
@@ -141,7 +143,8 @@ std::vector<uint8_t> buildPacket33(const std::string& localKey,
     pushU32BE(pkt, sequence);
     pushU32BE(pkt, command);
     pushU32BE(pkt, length);
-    pkt.insert(pkt.end(), VER33, VER33 + 15);
+    if (withVersionHeader)
+        pkt.insert(pkt.end(), VER33, VER33 + 15);
     pkt.insert(pkt.end(), encrypted.begin(), encrypted.end());
 
     uint32_t crc = computeCRC(pkt.data(), pkt.size());
@@ -384,6 +387,42 @@ static long findPrefix(const std::vector<uint8_t>& buf, const uint8_t* prefix) {
         if (memcmp(buf.data() + i, prefix, 4) == 0)
             return static_cast<long>(i);
     return -1;
+}
+
+long decodeFrame33(const std::vector<uint8_t>& buf, const std::string& key, Frame& out) {
+    long start = findPrefix(buf, PREFIX);
+    if (start < 0) return 0;
+    if (buf.size() < static_cast<size_t>(start) + 16) return 0;
+
+    const uint8_t* p = buf.data() + start;
+    uint32_t length = readU32BE(p + 12);
+    if (length < 8 || length > 0x10000) return -1;
+    if (buf.size() < static_cast<size_t>(start) + 16 + length) return 0;
+
+    out = Frame();
+    out.sequence = readU32BE(p + 4);
+    out.command  = readU32BE(p + 8);
+
+    const uint8_t* body    = p + 16;
+    size_t         bodyLen = length - 8;  // minus CRC(4) + suffix(4)
+    // Replies to our commands carry a retcode; device-initiated status pushes
+    // start directly with the "3.3" version header instead.
+    if (bodyLen >= 4 && !(body[0] == '3' && body[1] == '.' && body[2] == '3')) {
+        out.hasRetcode = true;
+        out.retcode    = readU32BE(body);
+        body    += 4;
+        bodyLen -= 4;
+    }
+    if (bodyLen >= 15 && body[0] == '3' && body[1] == '.' && body[2] == '3') {
+        body    += 15;
+        bodyLen -= 15;
+    }
+    if (bodyLen > 0 && bodyLen % 16 == 0) {
+        std::string pt = aesEcbDecrypt(key, body, bodyLen);
+        if (!pt.empty() && pt[0] == '{')
+            out.payload = pt;
+    }
+    return start + static_cast<long>(16 + length);
 }
 
 long decodeFrame34(const std::vector<uint8_t>& buf, const std::string& key, Frame& out) {

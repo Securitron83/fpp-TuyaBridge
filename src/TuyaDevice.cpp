@@ -118,27 +118,6 @@ void TuyaDevice::closeSocket() {
     m_rxBuf.clear();
 }
 
-bool TuyaDevice::ensureConnected() {
-    // Caller must hold m_mutex
-    // Tuya devices close idle connections. A send on a socket the device has
-    // already closed still "succeeds" locally and the command is lost, so check
-    // for a pending EOF first and reconnect if the device hung up.
-    if (m_sock >= 0) {
-        struct pollfd pfd;
-        pfd.fd     = m_sock;
-        pfd.events = POLLIN;
-        if (poll(&pfd, 1, 0) > 0 && (pfd.revents & (POLLIN | POLLHUP | POLLERR))) {
-            uint8_t probe;
-            ssize_t n = recv(m_sock, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
-            if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-                TuyaLog::debug("Device '%s': connection closed by device, reconnecting", m_name.c_str());
-                closeSocket();
-            }
-        }
-    }
-    return connect();
-}
-
 std::vector<uint8_t> TuyaDevice::buildSessionPacket(const std::string& key,
                                                     const std::string& plaintext,
                                                     uint32_t command) {
@@ -297,43 +276,8 @@ bool TuyaDevice::sendJson(const Json::Value& dps) {
         pkt = Tuya::buildPacket31(m_localKey, m_deviceId, jsonStr, m_sequence++);
     }
 
-    if (!sendPacket(pkt))
-        return false;
-
-    // Read the device's response.
-    // In debug mode: wait up to RESPONSE_WAIT_MS for a full reply and decode it.
-    // In normal mode: non-blocking drain so the socket stays clean for next call.
-    if (TuyaLog::debugEnabled()) {
-        struct pollfd pfd;
-        pfd.fd     = m_sock;
-        pfd.events = POLLIN;
-        if (poll(&pfd, 1, RESPONSE_WAIT_MS) > 0 && (pfd.revents & POLLIN)) {
-            uint8_t buf[1024];
-            ssize_t n = recv(m_sock, buf, sizeof(buf), MSG_DONTWAIT);
-            if (n > 0) {
-                std::vector<uint8_t> respPkt(buf, buf + n);
-                uint32_t retcode = 0xFFFFFFFF;
-                std::string json = Tuya::decodeResponse(respPkt, m_localKey, m_version, &retcode);
-                TuyaLog::debug("Device '%s' return code: 0x%08X (%s)",
-                               m_name.c_str(), retcode,
-                               retcode == 0 ? "OK" : "ERROR");
-                if (!json.empty())
-                    TuyaLog::debug("Device '%s' response JSON: %s", m_name.c_str(), json.c_str());
-                else
-                    TuyaLog::debug("Device '%s' response: %zd bytes (could not decode — wrong key or v3.4?)", m_name.c_str(), n);
-            } else {
-                TuyaLog::debug("Device '%s': no response within %dms", m_name.c_str(), RESPONSE_WAIT_MS);
-            }
-        } else {
-            TuyaLog::debug("Device '%s': no response within %dms", m_name.c_str(), RESPONSE_WAIT_MS);
-        }
-    } else {
-        // Non-debug: quick non-blocking drain so stale data doesn't accumulate
-        uint8_t buf[256];
-        recv(m_sock, buf, sizeof(buf), MSG_DONTWAIT);
-    }
-
-    return true;
+    // The reply is read (and the change confirmed) by verifyState().
+    return sendPacket(pkt);
 }
 
 bool TuyaDevice::sendJsonSession(const std::string& dpsStr) {
@@ -353,51 +297,168 @@ bool TuyaDevice::sendJsonSession(const std::string& dpsStr) {
 
     std::vector<uint8_t> pkt = buildSessionPacket(
         m_sessionKey, Tuya::versionHeader(m_version) + jsonStr, Tuya::CMD_CONTROL_NEW);
-    if (pkt.empty() || !sendPacket(pkt))
-        return false;
+    // The reply is read (and the change confirmed) by verifyState().
+    return !pkt.empty() && sendPacket(pkt);
+}
 
-    if (TuyaLog::debugEnabled()) {
-        Tuya::Frame resp;
-        if (readFrame(m_sessionKey, RESPONSE_WAIT_MS, resp)) {
-            std::string json = resp.payload;
-            if (json.compare(0, 3, m_version.substr(0, 3)) == 0 && json.size() >= 15)
-                json.erase(0, 15);
-            TuyaLog::debug("Device '%s' return code: 0x%08X (%s)", m_name.c_str(), resp.retcode,
-                           (!resp.hasRetcode || resp.retcode == 0) ? "OK" : "ERROR");
-            if (!json.empty())
-                TuyaLog::debug("Device '%s' response JSON: %s", m_name.c_str(), json.c_str());
-        } else {
-            TuyaLog::debug("Device '%s': no response within %dms", m_name.c_str(), RESPONSE_WAIT_MS);
-        }
-    } else {
-        // Non-debug: quick non-blocking drain so stale data doesn't accumulate
-        uint8_t buf[256];
-        while (recv(m_sock, buf, sizeof(buf), MSG_DONTWAIT) > 0) {}
-        m_rxBuf.clear();
+// Does the device-reported value match what we sent? Integers (brightness,
+// timers) are not compared because firmware may clamp or scale them.
+static bool dpsValueMatches(const Json::Value& sent, const Json::Value& reported) {
+    if (sent.isBool())
+        return reported.isBool() && reported.asBool() == sent.asBool();
+    if (sent.isString() && reported.isString()) {
+        std::string a = sent.asString(), b = reported.asString();
+        std::transform(a.begin(), a.end(), a.begin(), ::tolower);
+        std::transform(b.begin(), b.end(), b.begin(), ::tolower);
+        return a == b;
     }
     return true;
 }
 
+TuyaDevice::Verify TuyaDevice::verifyState(const Json::Value& dps) {
+    // Caller must hold m_mutex and an open connection on which dps was just sent.
+    // Ask the device for its state and compare it with what we set. Status pushes
+    // the device sends on its own after a change count as evidence too.
+    if (m_version != "3.3" && !usesSession())
+        return Verify::UNVERIFIABLE;  // v3.1: no query support in this plugin
+
+    std::vector<uint8_t> query;
+    if (usesSession()) {
+        query = buildSessionPacket(m_sessionKey, "{}", Tuya::CMD_QUERY_NEW);
+    } else {
+        std::string q = "{\"gwId\":\"" + m_deviceId + "\",\"devId\":\"" + m_deviceId +
+                        "\",\"uid\":\"" + m_deviceId + "\",\"t\":\"" +
+                        std::to_string(std::time(nullptr)) + "\"}";
+        query = Tuya::buildPacket33(m_localKey, q, m_sequence++, Tuya::CMD_QUERY, false);
+    }
+    if (query.empty() || !sendPacket(query))
+        return Verify::UNVERIFIABLE;
+
+    const std::string& key = usesSession() ? m_sessionKey : m_localKey;
+    Verify result = Verify::UNVERIFIABLE;
+    for (int i = 0; i < 6; ++i) {
+        Tuya::Frame f;
+        bool got = usesSession() ? readFrame(key, RESPONSE_WAIT_MS, f)
+                                 : readFrame33(RESPONSE_WAIT_MS, f);
+        if (!got)
+            break;
+
+        std::string json = f.payload;
+        if (json.size() >= 15 && json.compare(0, 2, "3.") == 0)
+            json.erase(0, 15);
+        if (json.empty() || json[0] != '{')
+            continue;
+
+        Json::Value root;
+        Json::CharReaderBuilder rb;
+        std::string errs;
+        std::istringstream in(json);
+        if (!Json::parseFromStream(rb, in, &root, &errs))
+            continue;
+        const Json::Value& reported = root.isMember("dps") ? root["dps"] : root["data"]["dps"];
+        if (!reported.isObject())
+            continue;
+
+        TuyaLog::debug("Device '%s' reported: %s", m_name.c_str(), json.c_str());
+        bool anyCompared = false, allMatch = true;
+        for (const auto& k : dps.getMemberNames()) {
+            if (!reported.isMember(k)) continue;
+            anyCompared = true;
+            if (!dpsValueMatches(dps[k], reported[k])) allMatch = false;
+        }
+        if (!anyCompared)
+            continue;
+        if (allMatch)
+            return Verify::CONFIRMED;
+        // A full status reply that disagrees is a definite miss; keep reading in case
+        // a later status push shows the change landing just after the query.
+        result = Verify::MISMATCH;
+    }
+    return result;
+}
+
+bool TuyaDevice::readFrame33(int timeoutMs, Tuya::Frame& out) {
+    // Caller must hold m_mutex
+    for (;;) {
+        long used = Tuya::decodeFrame33(m_rxBuf, m_localKey, out);
+        if (used > 0) {
+            m_rxBuf.erase(m_rxBuf.begin(), m_rxBuf.begin() + used);
+            return true;
+        }
+        if (used < 0) {
+            m_rxBuf.clear();
+            return false;
+        }
+        struct pollfd pfd;
+        pfd.fd     = m_sock;
+        pfd.events = POLLIN;
+        if (poll(&pfd, 1, timeoutMs) <= 0 || !(pfd.revents & POLLIN))
+            return false;
+        uint8_t buf[1024];
+        ssize_t n = recv(m_sock, buf, sizeof(buf), MSG_DONTWAIT);
+        if (n <= 0)
+            return false;
+        m_rxBuf.insert(m_rxBuf.end(), buf, buf + n);
+    }
+}
+
+bool TuyaDevice::execute(const Json::Value& dps, const char* what) {
+    // Caller must hold m_mutex
+    // Tuya devices drop idle connections without always telling us, and a
+    // command written into such a connection is silently lost. So every command
+    // gets a fresh connection, is read back to confirm it took, and is retried once.
+    static const int MAX_ATTEMPTS = 2;
+    for (int attempt = 1; attempt <= MAX_ATTEMPTS; ++attempt) {
+        closeSocket();
+        if (!connect()) {
+            TuyaLog::warn("Device '%s': %s attempt %d/%d — could not connect",
+                          m_name.c_str(), what, attempt, MAX_ATTEMPTS);
+            continue;
+        }
+        if (!sendJson(dps)) {
+            TuyaLog::warn("Device '%s': %s attempt %d/%d — send failed",
+                          m_name.c_str(), what, attempt, MAX_ATTEMPTS);
+            closeSocket();
+            continue;
+        }
+        Verify v = verifyState(dps);
+        closeSocket();
+
+        if (v == Verify::CONFIRMED) {
+            if (attempt > 1)
+                TuyaLog::info("Device '%s': %s confirmed on attempt %d", m_name.c_str(), what, attempt);
+            else
+                TuyaLog::debug("Device '%s': %s confirmed", m_name.c_str(), what);
+            return true;
+        }
+        if (v == Verify::UNVERIFIABLE) {
+            TuyaLog::warn("Device '%s': %s sent, but the device did not report its state to confirm it",
+                          m_name.c_str(), what);
+            return true;
+        }
+        TuyaLog::warn("Device '%s': %s attempt %d/%d — device state did not change",
+                      m_name.c_str(), what, attempt, MAX_ATTEMPTS);
+    }
+    TuyaLog::err("Device '%s': %s failed after %d attempts", m_name.c_str(), what, MAX_ATTEMPTS);
+    return false;
+}
+
 bool TuyaDevice::setSwitch(bool on) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (!ensureConnected()) return false;
-
     Json::Value dps;
     dps["1"] = on;
-    return sendJson(dps);
+    return execute(dps, on ? "switch on" : "switch off");
 }
 
 bool TuyaDevice::setDimmer(int brightness) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (!ensureConnected()) return false;
-
     bool on = (brightness > 0);
     int tuyaBrightness = std::min(1000, (brightness * 1000) / 100);
 
     Json::Value dps;
     dps["1"] = on;
     dps["2"] = tuyaBrightness;
-    return sendJson(dps);
+    return execute(dps, "set dimmer");
 }
 
 // Convert RGB (0–255 each) to Tuya's 12-hex-char HSV color string:
@@ -436,19 +497,16 @@ std::string TuyaDevice::rgbToTuyaColor(uint8_t r, uint8_t g, uint8_t b) {
 
 bool TuyaDevice::setColor(uint8_t r, uint8_t g, uint8_t b) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (!ensureConnected()) return false;
-
     bool on = (r > 0 || g > 0 || b > 0);
     Json::Value dps;
     dps["1"] = on;
     dps["5"] = rgbToTuyaColor(r, g, b);
-    return sendJson(dps);
+    return execute(dps, "set color");
 }
 
 bool TuyaDevice::sendRawDps(const Json::Value& dps) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (!ensureConnected()) return false;
-    return sendJson(dps);
+    return execute(dps, "send DPS");
 }
 
 TuyaDevice::Type TuyaDevice::typeFromString(const std::string& s) {

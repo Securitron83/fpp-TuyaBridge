@@ -55,6 +55,9 @@ std::vector<uint8_t> buildPacket35(const std::string& key,
 // consumed (> 0) when a complete frame was found, 0 when more data is needed,
 // and -1 when the data is malformed or fails authentication (wrong key).
 // Bytes before a frame prefix are skipped and counted as consumed.
+// v3.3 counterpart for reading replies and status pushes. CRC is not checked;
+// a frame only decodes if its payload decrypts to JSON with the local key.
+long decodeFrame33(const std::vector<uint8_t>& buf, const std::string& key, Frame& out);
 long decodeFrame34(const std::vector<uint8_t>& buf, const std::string& key, Frame& out);
 long decodeFrame35(const std::vector<uint8_t>& buf, const std::string& key, Frame& out);
 
@@ -70,11 +73,13 @@ std::string deriveSessionKey(const std::string& version,
 
 // Build a v3.3 command packet (most common on modern Tuya devices).
 // localKey must be exactly 16 bytes; jsonPayload is the raw DPS JSON string.
+// withVersionHeader must be false for CMD_QUERY (devices reject a header there).
 std::vector<uint8_t> buildPacket33(
     const std::string& localKey,
     const std::string& jsonPayload,
     uint32_t           sequence,
-    uint32_t           command = CMD_SET
+    uint32_t           command = CMD_SET,
+    bool               withVersionHeader = true
 );
 
 // Build a v3.1 command packet (older devices).
